@@ -4,7 +4,7 @@ A learning project: rebuilding the Django `HMS` hospital-management system in
 Spring Boot, one workflow at a time, against the **same Postgres database**.
 See the Django repo's `CLAUDE.md` for the original system this mirrors.
 
-## Status: Phase 5 — Pharmacy workflow
+## Status: Phase 6 — Cashier workflow
 
 ### Phase 1 — Foundation (tenancy + auth)
 
@@ -111,6 +111,49 @@ on the same item now fails its `visit.status != WAITING_PHARMACY` guard
 first and returns `409`, never reaching the idempotency branch. Confirmed
 live (see below), matching Django's `dispense_item` exactly.
 
+### Phase 6 — Cashier (bill a visit, collect payment)
+
+Mirrors `hospital/views.py`'s `visit_invoice_detail`/`add_invoice_item`/
+`record_payment` and `hospital/services.py`'s `refresh_invoice_totals`.
+Unlike Lab/Pharmacy, Cashier has **no visit-status gate at all** — a visit
+can be billed at any point in its lifecycle (Django's `cashier_dashboard`
+lists every visit, not a status-filtered queue), so `CashierService`
+doesn't call into `VisitWorkflow` or check `visit.getStatus()` anywhere.
+
+- `com.hms.entity.{VisitInvoice,InvoiceItem,Payment}` — mapped onto the
+  existing `hospital_visitinvoice`/`hospital_invoiceitem`/`hospital_payment`
+  tables. Django's `Service` model is ported as `com.hms.entity.BillableService`
+  — named that instead of `Service` specifically to avoid colliding with
+  Spring's own `@Service` stereotype annotation, which every workflow's
+  service class already imports.
+- `VisitInvoice.amountPaid`/`balanceDue` are Django `@property` values
+  derived from summing the `payments` relation — computed in
+  `CashierService` from `PaymentRepository.sumAmountPaidByInvoice`/
+  `InvoiceItemRepository.sumSubtotalByInvoice` rather than mapped as
+  entity fields, the same choice `LabOrder`/`PrescriptionItem` made for
+  their own derived counts in earlier phases.
+- `com.hms.cashier.CashierService`/`CashierController` —
+  `GET /api/visits/{id}/invoice` (auto-creates an empty invoice on first
+  view, mirroring Django's `get_or_create`), `POST /api/visits/{id}/invoice-items`,
+  `POST /api/visits/{id}/payments`, all `@PreAuthorize("hasRole('CASHIER')")`.
+- `VisitInvoiceRepository.findByVisitForUpdate` (`@Lock(PESSIMISTIC_WRITE)`)
+  is the analogue of Django's `VisitInvoice.objects.select_for_update()` in
+  `record_payment`. Unlike `viewInvoice`/`addInvoiceItem`, `recordPayment`
+  does **not** auto-create the invoice — matching Django exactly, a payment
+  against a visit with no invoice yet 404s rather than creating one.
+- `Payment.receiptNumber` is `unique` + `NOT NULL` with no DB default, so
+  it can't be known before the row has an id. Mirrors Django's two-step
+  save (`payment.save()` with a blank receipt number, then
+  `f"RCPT-{payment.pk:06d}"` and a second save) via
+  `Payment.assignReceiptNumber()`, called right after
+  `paymentRepository.save(payment)` generates the id.
+- Recording a payment is idempotent on an already-fully-paid invoice
+  (`alreadySettled: true`, no `Payment` row created) — same shape as Lab's
+  `alreadyRecorded`/Pharmacy's `alreadyDispensed`. An amount exceeding the
+  outstanding balance is rejected with `400` (Django's `clean_amount_paid`
+  form validation, ported as a runtime check since it depends on the
+  invoice's current balance, not a static bean-validation rule).
+
 ## Design notes
 
 - **`hospital` auto-population on insert is explicit, not automatic.**
@@ -177,14 +220,21 @@ never alter the schema; that's Django migrations' job.
 
 ### Verifying against real data
 
-**Done as of this session** — full Phase 1→5 flow run against the real
+**Done as of this session** — full Phase 1→6 flow run against the real
 `stjohns` hospital in the live `HMS` database: `doctor1`, `reception1`,
-`lab1`, and a new `pharm1` test user; a new `Patient`/`Appointment`/`Visit`
-all the way through registration → check-in → consultation → lab order →
-recorded result → `WAITING_PHARMACY` → **dispensed → `COMPLETED`**, then
+`lab1`, `pharm1`, and a new `cashier1` test user; a new `Patient`/
+`Appointment`/`Visit` all the way through registration → check-in →
+consultation → lab order → recorded result → `WAITING_PHARMACY` →
+dispensed → `COMPLETED` → **billed → partially paid → fully paid**, then
 cross-checked by reading the same rows back from Django's own ORM
 (`manage.py shell`) at every stage — genuine proof both apps share live
-data, not just a schema. Example commands:
+data, not just a schema. (One wrinkle hit during this cross-check: reading
+`invoice.amount_paid`/`.balance_due` from a raw `manage.py shell` session
+returned `0` at first — not a Spring bug, but the tenancy contextvar gotcha
+CLAUDE.md already documents: those Django `@property`s call
+`self.payments.all()` through the tenant-scoped default manager, which
+needs `set_current_hospital(...)` called first in a script with no request
+context. Once set, it matched the Spring API exactly.) Example commands:
 
 ```
 curl -H "Host: <realsubdomain>.lvh.me:8000" \
@@ -218,6 +268,13 @@ curl -H "Host: <realsubdomain>.lvh.me:8000" -u lab1:<pass> -H "Content-Type: app
 curl -H "Host: <realsubdomain>.lvh.me:8000" -u pharm1:<pass> http://localhost:8080/api/visits/<id>/prescription
 curl -H "Host: <realsubdomain>.lvh.me:8000" -u pharm1:<pass> \
      -X POST http://localhost:8080/api/visits/<id>/prescription-items/<itemId>/dispense
+
+curl -H "Host: <realsubdomain>.lvh.me:8000" -u cashier1:<pass> http://localhost:8080/api/visits/<id>/invoice
+curl -H "Host: <realsubdomain>.lvh.me:8000" -u cashier1:<pass> -H "Content-Type: application/json" \
+     -X POST http://localhost:8080/api/visits/<id>/invoice-items -d '{"serviceId":1,"quantity":2}'
+curl -H "Host: <realsubdomain>.lvh.me:8000" -u cashier1:<pass> -H "Content-Type: application/json" \
+     -X POST http://localhost:8080/api/visits/<id>/payments \
+     -d '{"amountPaid":15.00,"method":"CASH","reference":"first"}'
 ```
 
 The Postgres credential issue that previously blocked this (`.env`'s
@@ -232,12 +289,13 @@ elevated terminal — `Restart-Service postgresql-x64-18 -Force`), running
 
 Local dev fixtures created in the `stjohns` hospital (id 7) for this
 verification, in case anyone needs to redo it: `doctor1`'s password reset to
-a known value, `reception1` (`RECEPTIONIST`), `lab1` (`LAB`), and `pharm1`
-(`PHARMACIST`) test users, a `Drug` ("Paracetamol") and `LabTest` ("CBC")
-row, and a `Stock` batch (50 units of Paracetamol, batch `SPRINGVERIFY-001`)
-— see git history/session notes for the exact `manage.py shell` commands
-used, not repeated here since they're throwaway local data, not part of
-the app.
+a known value, `reception1` (`RECEPTIONIST`), `lab1` (`LAB`), `pharm1`
+(`PHARMACIST`), and `cashier1` (`CASHIER`) test users, a `Drug`
+("Paracetamol") and `LabTest` ("CBC") row, a `Stock` batch (50 units of
+Paracetamol, batch `SPRINGVERIFY-001`), and a `Service` ("Consultation Fee",
+20.00) row — see git history/session notes for the exact `manage.py shell`
+commands used, not repeated here since they're throwaway local data, not
+part of the app.
 
 ## Tests
 
@@ -258,19 +316,20 @@ has them configured.
 - `VisitWorkflowTests` — pure, no mocks; all branches of `afterConsultation`/`afterLab`.
 - `LabServiceTests` — status guard, result idempotency, `PENDING`→`PROCESSING` advancement, and both `afterLab` routing branches, all against mocked repositories.
 - `PharmacyServiceTests` — status guard, dispense idempotency, FEFO batch deduction across multiple `Stock` rows, insufficient-stock rejection (no partial writes), and both dispense-completes-the-visit / items-still-pending outcomes, all against mocked repositories.
+- `CashierServiceTests` — invoice auto-creation on first view, invoice-item price copy + totals refresh, unknown-service rejection, payment-with-no-invoice-yet rejection, payment idempotency on an already-settled invoice, over-the-balance rejection, and receipt-number assignment + status advancement to `PAID`, all against mocked repositories.
 
 Worth adding once a phase needs real concurrency/isolation proof: a full
 `@SpringBootTest` against real Postgres mirroring Django's
 `TenantIsolationTests` — not done yet since mocks were enough to prove the
-logic in Phases 1–5.
+logic in Phases 1–6.
 
 ## Not in scope for this phase
 
-Cashier, Nurse, Stock Manager, Admin.
+Nurse, Stock Manager, Admin.
 
-## Next: Phase 6 — Cashier workflow
+## Next: Phase 7 — Nurse workflow
 
-Billing a visit and collecting payment against `VisitInvoice`/`Payment` —
-the visit from this session's verification (id 3) is now `COMPLETED` and
-has a dispensed prescription, a reasonable candidate to bill against once
-this phase exists.
+Pre-consultation vitals triage (`can_nurse_access`, a shared-queue check
+like Lab/Pharmacy/Cashier rather than a per-assignee one like Doctor) —
+the visit from this session's verification (id 3) is now fully billed and
+`PAID`, so a fresh visit will need registering to exercise this phase.
