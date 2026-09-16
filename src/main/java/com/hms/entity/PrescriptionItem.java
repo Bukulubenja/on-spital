@@ -107,4 +107,11 @@ public class PrescriptionItem extends TenantEntity {
     public User getDispensedBy() {
         return dispensedBy;
     }
+
+    /** Mirrors dispense_prescription_item's final trio of field writes (services.py). */
+    public void markDispensed(User pharmacist) {
+        this.dispensed = true;
+        this.dispensedAt = OffsetDateTime.now();
+        this.dispensedBy = pharmacist;
+    }
 }

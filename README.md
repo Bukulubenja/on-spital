@@ -4,7 +4,7 @@ A learning project: rebuilding the Django `HMS` hospital-management system in
 Spring Boot, one workflow at a time, against the **same Postgres database**.
 See the Django repo's `CLAUDE.md` for the original system this mirrors.
 
-## Status: Phase 4 — Lab workflow
+## Status: Phase 5 — Pharmacy workflow
 
 ### Phase 1 — Foundation (tenancy + auth)
 
@@ -72,6 +72,45 @@ returns `409` (matches Django: the `visit.status != WAITING_LAB` guard
 runs *before* the idempotency check, so once the visit has moved on, no
 further submissions are accepted — confirmed by live testing, not a bug).
 
+### Phase 5 — Pharmacy (dispense prescriptions, FEFO stock deduction)
+
+Mirrors `hospital/views.py`'s `dispense_item` (plus the read half of
+`prescription_detail`) and `hospital/services.py`'s
+`dispense_prescription_item` — first-expiry-first-out stock deduction
+across a drug's batches, rule-for-rule. Like Lab, Pharmacy has no per-user
+ownership check — it works a shared queue.
+
+- `com.hms.entity.{Stock,StockTransaction}` — mapped onto the existing
+  `hospital_stock`/`hospital_stocktransaction` tables. `Drug` was already
+  mapped (read-only) since Phase 3.
+- `com.hms.entity.PrescriptionItem.markDispensed(User)` — new mutator
+  bundling the `dispensed`/`dispensedAt`/`dispensedBy` trio Django writes
+  together in `dispense_prescription_item`.
+- `com.hms.pharmacy.PharmacyService`/`PharmacyController` —
+  `POST /api/visits/{id}/prescription-items/{itemId}/dispense`,
+  `GET /api/visits/{id}/prescription`, both `@PreAuthorize("hasRole('PHARMACIST')")`.
+- `StockRepository.findByDrugAndQuantityGreaterThanOrderByExpiryDateAsc`
+  (`@Lock(PESSIMISTIC_WRITE)`) is the direct analogue of Django's
+  `Stock.objects.select_for_update().filter(drug=..., quantity__gt=0).order_by("expiry_date")`
+  — locks every in-stock batch of the drug, earliest expiry first, so
+  concurrent dispenses of the same drug serialize against each other.
+- Insufficient stock across all batches throws `409` and leaves every
+  batch/item/visit untouched (Django's version just returns `False` and
+  the view flashes an error — no partial deduction either way).
+- Dispensing the last pending item on a prescription completes the visit
+  (`Visit.Status.COMPLETED`) — this is a terminal state, not a
+  `VisitWorkflow` routing decision, matching Django's `dispense_item` view
+  setting `visit.status` directly rather than calling a `visit_status_after_*`
+  function.
+
+Dispensing an already-dispensed item is idempotent (`alreadyDispensed: true`,
+no stock touched) exactly like Lab's `alreadyRecorded` — but the same
+"status guard runs before the idempotency check" quirk from Phase 4 applies
+here too: once the visit has moved on to `COMPLETED`, a repeat dispense call
+on the same item now fails its `visit.status != WAITING_PHARMACY` guard
+first and returns `409`, never reaching the idempotency branch. Confirmed
+live (see below), matching Django's `dispense_item` exactly.
+
 ## Design notes
 
 - **`hospital` auto-population on insert is explicit, not automatic.**
@@ -138,13 +177,14 @@ never alter the schema; that's Django migrations' job.
 
 ### Verifying against real data
 
-**Done as of this session** — full Phase 1→4 flow run against the real
-`stjohns` hospital in the live `HMS` database: `doctor1`, `reception1`, and
-a new `lab1` test user; a new `Patient`/`Appointment`/`Visit` all the way
-through registration → check-in → consultation → lab order → **recorded
-result → `WAITING_PHARMACY`**, then cross-checked by reading the same rows
-back from Django's own ORM (`manage.py shell`) at every stage — genuine
-proof both apps share live data, not just a schema. Example commands:
+**Done as of this session** — full Phase 1→5 flow run against the real
+`stjohns` hospital in the live `HMS` database: `doctor1`, `reception1`,
+`lab1`, and a new `pharm1` test user; a new `Patient`/`Appointment`/`Visit`
+all the way through registration → check-in → consultation → lab order →
+recorded result → `WAITING_PHARMACY` → **dispensed → `COMPLETED`**, then
+cross-checked by reading the same rows back from Django's own ORM
+(`manage.py shell`) at every stage — genuine proof both apps share live
+data, not just a schema. Example commands:
 
 ```
 curl -H "Host: <realsubdomain>.lvh.me:8000" \
@@ -174,6 +214,10 @@ curl -H "Host: <realsubdomain>.lvh.me:8000" -u lab1:<pass> http://localhost:8080
 curl -H "Host: <realsubdomain>.lvh.me:8000" -u lab1:<pass> -H "Content-Type: application/json" \
      -X POST http://localhost:8080/api/visits/<id>/lab-order-items/<itemId>/result \
      -d '{"resultValue":"5.2","normalRange":"4.0-6.0","remarks":"Within normal range"}'
+
+curl -H "Host: <realsubdomain>.lvh.me:8000" -u pharm1:<pass> http://localhost:8080/api/visits/<id>/prescription
+curl -H "Host: <realsubdomain>.lvh.me:8000" -u pharm1:<pass> \
+     -X POST http://localhost:8080/api/visits/<id>/prescription-items/<itemId>/dispense
 ```
 
 The Postgres credential issue that previously blocked this (`.env`'s
@@ -188,10 +232,12 @@ elevated terminal — `Restart-Service postgresql-x64-18 -Force`), running
 
 Local dev fixtures created in the `stjohns` hospital (id 7) for this
 verification, in case anyone needs to redo it: `doctor1`'s password reset to
-a known value, `reception1` (`RECEPTIONIST`) and `lab1` (`LAB`) test users,
-a `Drug` ("Paracetamol") and `LabTest` ("CBC") row — see git history/session
-notes for the exact `manage.py shell` commands used, not repeated here since
-they're throwaway local data, not part of the app.
+a known value, `reception1` (`RECEPTIONIST`), `lab1` (`LAB`), and `pharm1`
+(`PHARMACIST`) test users, a `Drug` ("Paracetamol") and `LabTest` ("CBC")
+row, and a `Stock` batch (50 units of Paracetamol, batch `SPRINGVERIFY-001`)
+— see git history/session notes for the exact `manage.py shell` commands
+used, not repeated here since they're throwaway local data, not part of
+the app.
 
 ## Tests
 
@@ -211,15 +257,20 @@ has them configured.
 - `DoctorServiceTests` — access-control guard clauses (wrong status, wrong doctor), queue-ticket marking, lab-test order idempotency, all against mocked repositories.
 - `VisitWorkflowTests` — pure, no mocks; all branches of `afterConsultation`/`afterLab`.
 - `LabServiceTests` — status guard, result idempotency, `PENDING`→`PROCESSING` advancement, and both `afterLab` routing branches, all against mocked repositories.
+- `PharmacyServiceTests` — status guard, dispense idempotency, FEFO batch deduction across multiple `Stock` rows, insufficient-stock rejection (no partial writes), and both dispense-completes-the-visit / items-still-pending outcomes, all against mocked repositories.
 
 Worth adding once a phase needs real concurrency/isolation proof: a full
 `@SpringBootTest` against real Postgres mirroring Django's
 `TenantIsolationTests` — not done yet since mocks were enough to prove the
-logic in Phases 1–4.
+logic in Phases 1–5.
 
-## Next: Phase 5 — Pharmacy workflow
+## Not in scope for this phase
 
-Dispensing against `PrescriptionItem`/`Stock` with FEFO (earliest-expiry-first)
-batch deduction — the visit from this session's verification (id 3) is
-already sitting in `WAITING_PHARMACY` with a real `Paracetamol` prescription
-item, ready to dispense against once this phase exists.
+Cashier, Nurse, Stock Manager, Admin.
+
+## Next: Phase 6 — Cashier workflow
+
+Billing a visit and collecting payment against `VisitInvoice`/`Payment` —
+the visit from this session's verification (id 3) is now `COMPLETED` and
+has a dispensed prescription, a reasonable candidate to bill against once
+this phase exists.
