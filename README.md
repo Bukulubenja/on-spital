@@ -4,7 +4,7 @@ A learning project: rebuilding the Django `HMS` hospital-management system in
 Spring Boot, one workflow at a time, against the **same Postgres database**.
 See the Django repo's `CLAUDE.md` for the original system this mirrors.
 
-## Status: Phase 3 — Doctor workflow
+## Status: Phase 4 — Lab workflow
 
 ### Phase 1 — Foundation (tenancy + auth)
 
@@ -53,6 +53,24 @@ drive the `Visit` state machine forward.
 - `com.hms.doctor.DoctorService`/`DoctorController` — `POST /api/visits/{id}/{start,vitals,diagnosis,prescriptions,lab-tests,complete}`, each `@PreAuthorize("hasRole('DOCTOR')")`. The current doctor comes from `SecurityContextHolder` → `HmsUserPrincipal`, not a request parameter — mirrors how `request.user` flows through Django's views.
 
 `addLabTest` is idempotent (ordering the same test twice returns `alreadyOrdered: true` instead of erroring), matching Django's `get_or_create` + info-message path rather than `visit_add_prescription_item`'s plain create-another-row behavior for prescriptions.
+
+### Phase 4 — Lab (record results, complete lab orders)
+
+Mirrors `hospital/views.py`'s `record_lab_result` (plus the read half of
+`lab_order_detail`) and `hospital/services.py`'s `lab_order_fully_resulted`.
+First phase to exercise `VisitWorkflow.afterLab` (added proactively back in
+Phase 3, unused until now). Unlike Doctor, Lab has **no per-user ownership
+check** — it works a shared queue, matching CLAUDE.md's description of the
+Django design, so there's nothing to add to `VisitAccess` here.
+
+- `com.hms.entity.LabResult` — mapped onto the existing `hospital_labresult` table
+- `com.hms.lab.LabService`/`LabController` — `POST /api/visits/{id}/lab-order-items/{itemId}/result`, `GET /api/visits/{id}/lab-order`, both `@PreAuthorize("hasRole('LAB')")`
+- "Fully resulted" check adapted as a count comparison (`labResultRepository.countByLabOrder(labOrder) >= labOrderItemRepository.countByLabOrder(labOrder)`) rather than Django's set-comparison — equivalent given the unique `(lab_order, test)` constraint and the per-test idempotency guard make duplicates impossible either way
+
+Recording a result on an already-fully-resulted order's test correctly
+returns `409` (matches Django: the `visit.status != WAITING_LAB` guard
+runs *before* the idempotency check, so once the visit has moved on, no
+further submissions are accepted — confirmed by live testing, not a bug).
 
 ## Design notes
 
@@ -120,12 +138,13 @@ never alter the schema; that's Django migrations' job.
 
 ### Verifying against real data
 
-**Done as of this session** — full Phase 1→3 flow run against the real
-`stjohns` hospital in the live `HMS` database (`doctor1`, a new `reception1`
-test user, a new `Patient`/`Appointment`/`Visit` all the way through to
-`WAITING_LAB`), then cross-checked by reading the same rows back from
-Django's own ORM (`manage.py shell`) — genuine proof both apps share live
-data, not just a schema. Example commands:
+**Done as of this session** — full Phase 1→4 flow run against the real
+`stjohns` hospital in the live `HMS` database: `doctor1`, `reception1`, and
+a new `lab1` test user; a new `Patient`/`Appointment`/`Visit` all the way
+through registration → check-in → consultation → lab order → **recorded
+result → `WAITING_PHARMACY`**, then cross-checked by reading the same rows
+back from Django's own ORM (`manage.py shell`) at every stage — genuine
+proof both apps share live data, not just a schema. Example commands:
 
 ```
 curl -H "Host: <realsubdomain>.lvh.me:8000" \
@@ -150,6 +169,11 @@ curl -H "Host: <realsubdomain>.lvh.me:8000" -u <receptionist>:<pass> \
 
 curl -H "Host: <realsubdomain>.lvh.me:8000" -u doctor1:<pass> -X POST http://localhost:8080/api/visits/<id>/start
 curl -H "Host: <realsubdomain>.lvh.me:8000" -u doctor1:<pass> -X POST http://localhost:8080/api/visits/<id>/complete
+
+curl -H "Host: <realsubdomain>.lvh.me:8000" -u lab1:<pass> http://localhost:8080/api/visits/<id>/lab-order
+curl -H "Host: <realsubdomain>.lvh.me:8000" -u lab1:<pass> -H "Content-Type: application/json" \
+     -X POST http://localhost:8080/api/visits/<id>/lab-order-items/<itemId>/result \
+     -d '{"resultValue":"5.2","normalRange":"4.0-6.0","remarks":"Within normal range"}'
 ```
 
 The Postgres credential issue that previously blocked this (`.env`'s
@@ -164,9 +188,9 @@ elevated terminal — `Restart-Service postgresql-x64-18 -Force`), running
 
 Local dev fixtures created in the `stjohns` hospital (id 7) for this
 verification, in case anyone needs to redo it: `doctor1`'s password reset to
-a known value, a new `reception1` (`RECEPTIONIST`) user, a `Drug`
-("Paracetamol") and `LabTest` ("CBC") row — see git history/session notes
-for the exact `manage.py shell` commands used, not repeated here since
+a known value, `reception1` (`RECEPTIONIST`) and `lab1` (`LAB`) test users,
+a `Drug` ("Paracetamol") and `LabTest` ("CBC") row — see git history/session
+notes for the exact `manage.py shell` commands used, not repeated here since
 they're throwaway local data, not part of the app.
 
 ## Tests
@@ -186,13 +210,16 @@ has them configured.
 - `ReceptionServiceTests` — check-in guard clauses, pessimistic-lock queue numbering arithmetic, and patient-number formatting, all against mocked repositories.
 - `DoctorServiceTests` — access-control guard clauses (wrong status, wrong doctor), queue-ticket marking, lab-test order idempotency, all against mocked repositories.
 - `VisitWorkflowTests` — pure, no mocks; all branches of `afterConsultation`/`afterLab`.
+- `LabServiceTests` — status guard, result idempotency, `PENDING`→`PROCESSING` advancement, and both `afterLab` routing branches, all against mocked repositories.
 
 Worth adding once a phase needs real concurrency/isolation proof: a full
 `@SpringBootTest` against real Postgres mirroring Django's
 `TenantIsolationTests` — not done yet since mocks were enough to prove the
-logic in Phases 1–3.
+logic in Phases 1–4.
 
-## Next: Phase 4 — Lab or Pharmacy workflow
+## Next: Phase 5 — Pharmacy workflow
 
-Both now have real data to act on (`visit_status_after_lab`, dispensing
-against `PrescriptionItem`/`Stock`) — whichever the user picks first.
+Dispensing against `PrescriptionItem`/`Stock` with FEFO (earliest-expiry-first)
+batch deduction — the visit from this session's verification (id 3) is
+already sitting in `WAITING_PHARMACY` with a real `Paracetamol` prescription
+item, ready to dispense against once this phase exists.
