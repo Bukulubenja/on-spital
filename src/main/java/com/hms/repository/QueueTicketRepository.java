@@ -1,6 +1,7 @@
 package com.hms.repository;
 
 import com.hms.entity.QueueTicket;
+import com.hms.entity.Visit;
 import jakarta.persistence.LockModeType;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Lock;
@@ -21,4 +22,6 @@ public interface QueueTicketRepository extends JpaRepository<QueueTicket, Long> 
     Optional<QueueTicket> findFirstByCreatedAtBetweenOrderByQueueNumberDesc(OffsetDateTime dayStart, OffsetDateTime dayEnd);
 
     List<QueueTicket> findByCreatedAtBetweenAndServedFalseOrderByQueueNumberAsc(OffsetDateTime dayStart, OffsetDateTime dayEnd);
+
+    Optional<QueueTicket> findByVisit(Visit visit);
 }

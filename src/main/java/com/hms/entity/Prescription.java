@@ -5,54 +5,52 @@ import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.FetchType;
 import jakarta.persistence.JoinColumn;
-import jakarta.persistence.OneToOne;
+import jakarta.persistence.ManyToOne;
 import jakarta.persistence.PrePersist;
 import jakarta.persistence.Table;
 
 import java.time.OffsetDateTime;
 
-/** Maps to Django's existing hospital_queueticket table. */
+/** Maps to Django's existing hospital_prescription table. */
 @Entity
-@Table(name = "hospital_queueticket")
-public class QueueTicket extends TenantEntity {
+@Table(name = "hospital_prescription")
+public class Prescription extends TenantEntity {
 
-    @OneToOne(fetch = FetchType.LAZY, optional = false)
+    @ManyToOne(fetch = FetchType.LAZY, optional = false)
     @JoinColumn(name = "visit_id", nullable = false)
     private Visit visit;
 
-    @Column(name = "queue_number", nullable = false)
-    private int queueNumber;
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "doctor_id", nullable = true)
+    private User doctor;
 
-    @Column(nullable = false)
-    private boolean served;
+    @ManyToOne(fetch = FetchType.LAZY, optional = false)
+    @JoinColumn(name = "patient_id", nullable = false)
+    private Patient patient;
 
     @Column(name = "created_at", nullable = false)
     private OffsetDateTime createdAt;
 
-    protected QueueTicket() {
+    protected Prescription() {
         // JPA
     }
 
-    public QueueTicket(Visit visit, int queueNumber) {
+    public Prescription(Visit visit, User doctor, Patient patient) {
         this.visit = visit;
-        this.queueNumber = queueNumber;
-        this.served = false;
+        this.doctor = doctor;
+        this.patient = patient;
     }
 
     public Visit getVisit() {
         return visit;
     }
 
-    public int getQueueNumber() {
-        return queueNumber;
+    public User getDoctor() {
+        return doctor;
     }
 
-    public boolean isServed() {
-        return served;
-    }
-
-    public void setServed(boolean served) {
-        this.served = served;
+    public Patient getPatient() {
+        return patient;
     }
 
     public OffsetDateTime getCreatedAt() {

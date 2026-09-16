@@ -15,10 +15,11 @@ import jakarta.persistence.Table;
 import java.time.OffsetDateTime;
 
 /**
- * Maps to Django's existing hospital_visit table. Only Phase 2's
- * check-in path writes here for now (visitType=OPD, status=WAITING_DOCTOR)
- * — the full state machine (visit_status_after_consultation/_after_lab in
- * Django's services.py) is exercised starting the Doctor workflow phase.
+ * Maps to Django's existing hospital_visit table. Phase 2's check-in path
+ * creates rows here (visitType=OPD, status=WAITING_DOCTOR); Phase 3 (the
+ * Doctor workflow) drives status forward through the state machine
+ * (visit_status_after_consultation/_after_lab in Django's services.py —
+ * see com.hms.domain.VisitWorkflow) and records the diagnosis summary.
  */
 @Entity
 @Table(name = "hospital_visit")
@@ -115,6 +116,14 @@ public class Visit extends TenantEntity {
 
     public String getDiagnosisSummary() {
         return diagnosisSummary;
+    }
+
+    public void setStatus(Status status) {
+        this.status = status;
+    }
+
+    public void setDiagnosisSummary(String diagnosisSummary) {
+        this.diagnosisSummary = diagnosisSummary == null ? "" : diagnosisSummary;
     }
 
     @PrePersist

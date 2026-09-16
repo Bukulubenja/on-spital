@@ -22,8 +22,8 @@ import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.util.Optional;
 
-import static com.hms.reception.EntityTestSupport.setField;
-import static com.hms.reception.EntityTestSupport.withId;
+import static com.hms.testsupport.EntityTestSupport.setField;
+import static com.hms.testsupport.EntityTestSupport.withId;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
