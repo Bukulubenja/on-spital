@@ -1,0 +1,33 @@
+spring:
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:HMS}
+    username: ${DB_USER:postgres}
+    password: ${DB_PASSWORD:}
+  jpa:
+    # Normally left false (OSIV is a well-known anti-pattern for N+1s).
+    # Kept true here deliberately: TenantResolvingFilter needs a Hibernate
+    # Session already bound to the request thread so it can enable the
+    # tenantFilter before Spring Security's UserDetailsService runs its
+    # (filtered) DB lookup. Revisit if/when this becomes a real perf issue.
+    open-in-view: true
+    hibernate:
+      # The schema is owned by Django's migrations. Spring Boot only ever
+      # maps to it here, never alters it — never change this to update/create.
+      ddl-auto: validate
+    properties:
+      hibernate:
+        format_sql: true
+    show-sql: false
+
+server:
+  port: ${SERVER_PORT:8080}
+
+app:
+  # Suffix stripped from the Host header to find the subdomain, mirrors
+  # Django's BASE_DOMAIN setting. Must match the Django .env value to
+  # resolve the same tenants.
+  base-domain: ${BASE_DOMAIN:lvh.me:8000}
+  # DEBUG-only escape hatch for the X-Hospital-Subdomain header fallback,
+  # mirrors Django's settings.DEBUG gate in TenantMiddleware. Never enable
+  # this in a real deployment — see TenantResolvingFilter for why.
+  debug: ${APP_DEBUG:true}
