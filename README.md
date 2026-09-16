@@ -4,7 +4,9 @@ A learning project: rebuilding the Django `HMS` hospital-management system in
 Spring Boot, one workflow at a time, against the **same Postgres database**.
 See the Django repo's `CLAUDE.md` for the original system this mirrors.
 
-## Status: Phase 1 — Foundation (tenancy + auth)
+## Status: Phase 2 — Reception workflow
+
+### Phase 1 — Foundation (tenancy + auth)
 
 Implements the multi-tenancy mechanism from `hospital/tenancy.py` +
 `hospital/middleware.py` in Spring Boot/Hibernate terms, and proves it works
@@ -15,13 +17,39 @@ against real data with one endpoint.
 - `com.hms.tenancy.TenantResolvingFilter` — resolves the hospital from the request subdomain, gates the `X-Hospital-Subdomain` debug fallback (≈ `TenantMiddleware`)
 - `com.hms.entity.{Hospital,User}` — mapped onto the existing `hospital_hospital`/`hospital_user` tables
 - `com.hms.security.DjangoPbkdf2PasswordEncoder` — verifies Django's `pbkdf2_sha256$...` hashes directly, so existing logins work unchanged
-- `GET /api/whoami` — the one endpoint; proves auth + tenancy together
+- `GET /api/whoami` — proves auth + tenancy together
 
-**Deliberately not built yet** (see `TenantEntity`'s Javadoc): auto-populating
-`hospital` on insert. Django does this in `TenantModel.save()`; the Hibernate
-equivalent is a session `Interceptor` bean, which is worth designing against
-a real subclass rather than speculatively — that lands with Phase 2's first
-real tenant-scoped entity (`Patient`).
+### Phase 2 — Reception (register patient, book appointment, check in)
+
+Mirrors `hospital/views.py`'s `patient_create`/`appointment_create`/`appointment_checkin`
+and `hospital/forms.py`'s `PatientForm`/`AppointmentForm`, field-for-field and
+rule-for-rule.
+
+- `com.hms.entity.{Department,Patient,Appointment,Visit,QueueTicket}` — mapped onto the existing tables of the same names
+- `com.hms.tenancy.TenantScoping` — explicit `hospital`-assignment helper for new rows (see "Design notes" below for why this isn't automatic)
+- `com.hms.reception.ReceptionService` — business logic, incl. the pessimistic-locked queue-numbering (`QueueTicketRepository.findFirstByCreatedAtBetweenOrderByQueueNumberDesc`, `@Lock(PESSIMISTIC_WRITE)`) that mirrors Django's `select_for_update()` in `appointment_checkin`
+- `com.hms.reception.ReceptionController` — `POST /api/patients`, `POST /api/appointments`, `POST /api/appointments/{id}/checkin`, `GET /api/reception/queue`, each `@PreAuthorize("hasRole('RECEPTIONIST')")`
+
+**Deliberate behavior improvement over the Django source**: patient-number
+generation (`Patient.registerPatient`) uses a temporary unique placeholder
+(`"TMP-" + UUID`) for the initial insert instead of Django's blank string,
+which has a real (if narrow) race on concurrent registrations — see
+`ReceptionService.registerPatient`'s comment. Final stored values are
+identical (`P-000042`-style), so rows stay compatible across both apps.
+
+## Design notes
+
+- **`hospital` auto-population on insert is explicit, not automatic.**
+  Django's `TenantModel.save()` does this for free; the idiomatic Hibernate
+  equivalent (a `PreInsertEventListener`, replacing the now-deprecated
+  `Interceptor.onSave()`) needs reaching into `SessionFactoryImpl`'s
+  `EventListenerRegistry` in a way worth verifying against a running app
+  rather than guessing. Until then, every entity-creating service method
+  calls `TenantScoping.currentHospitalReference(entityManager)` once and
+  sets it explicitly — one small helper, not framework magic.
+- **Hibernate filters need a session bound before Spring Security runs**,
+  which is why `spring.jpa.open-in-view` is `true` here (normally an
+  anti-pattern) — see the comment in `application.yml`.
 
 ## Running it
 
@@ -49,31 +77,49 @@ never alter the schema; that's Django migrations' job.
 curl -H "Host: <realsubdomain>.lvh.me:8000" \
      -u <existing-django-username>:<their-real-password> \
      http://localhost:8080/api/whoami
+
+curl -H "Host: <realsubdomain>.lvh.me:8000" -u <receptionist>:<pass> \
+     -X POST http://localhost:8080/api/patients \
+     -H "Content-Type: application/json" \
+     -d '{"fullName":"Jane Doe","gender":"FEMALE","dateOfBirth":"1990-01-01","phone":"555-0100"}'
+
+curl -H "Host: <realsubdomain>.lvh.me:8000" -u <receptionist>:<pass> \
+     -X POST http://localhost:8080/api/appointments \
+     -H "Content-Type: application/json" \
+     -d '{"patientId":1,"doctorId":<a real DOCTOR user id>,"departmentId":<a real department id>,"appointmentDate":"2026-09-20T10:00:00+00:00"}'
+
+curl -H "Host: <realsubdomain>.lvh.me:8000" -u <receptionist>:<pass> \
+     -X POST http://localhost:8080/api/appointments/1/checkin
+
+curl -H "Host: <realsubdomain>.lvh.me:8000" -u <receptionist>:<pass> \
+     http://localhost:8080/api/reception/queue
 ```
 
-Should return that user's real `username`/`role`/`hospitalSubdomain`.
-
-**Known blocker as of the last session**: the Django `.env`'s `DB_PASSWORD`
-is not currently authenticating against the running local Postgres
-(`localhost:9999`) — `manage.py shell` hits the same
-`password authentication failed for user "postgres"` error, so this isn't
-something this app broke. Fix the Django-side DB credentials first, then
-re-run the curl check above.
+**Known blocker, still open**: the Django `.env`'s `DB_PASSWORD` does not
+currently authenticate against the running local Postgres (`localhost:9999`)
+— `manage.py shell` hits the same `password authentication failed for user
+"postgres"` error, so this isn't something either app broke. Fix the
+Django-side DB credentials first, then run the checks above.
 
 ## Tests
 
 ```
-./mvnw test
+./mvnw test -Dtest='!HmsSpringBootApplicationTests'
 ```
 
-- `DjangoPbkdf2PasswordEncoderTests` — verifies against a hash generated by
-  Django's actual `PBKDF2PasswordHasher`, not a hand-rolled fixture.
-- `TenantResolvingFilterTests` — unit-level (mocked repository/session), not
-  yet a full `@SpringBootTest` against real Postgres. Worth upgrading once
-  Phase 2 adds a second tenant-scoped entity to prove real cross-tenant
-  isolation with (mirroring Django's `TenantIsolationTests`).
+(Excluding the Initializr-generated context-load test, which needs a real
+DB connection — blocked by the same credential issue above.)
 
-## Next: Phase 2 — Reception workflow
+- `DjangoPbkdf2PasswordEncoderTests` — verifies against a hash generated by Django's actual `PBKDF2PasswordHasher`.
+- `TenantResolvingFilterTests` — unit-level (mocked repository/session).
+- `ReceptionServiceTests` — check-in guard clauses, pessimistic-lock queue numbering arithmetic, and patient-number formatting, all against mocked repositories.
 
-`Patient`, `Appointment`, `QueueTicket`, and check-in — the first real
-business workflow, same "one workflow at a time" pace.
+Worth adding once Phase 3 needs real concurrency/isolation proof: a full
+`@SpringBootTest` against real Postgres mirroring Django's
+`TenantIsolationTests` — not done yet since mocks were enough to prove the
+logic in Phases 1–2.
+
+## Next: Phase 3 — Doctor workflow
+
+Vitals, diagnosis, prescribe, order labs, complete visit — the first phase
+to actually exercise `visit_status_after_consultation`/`_after_lab`.
