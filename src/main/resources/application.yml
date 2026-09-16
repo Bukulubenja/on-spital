@@ -4,12 +4,16 @@ spring:
     username: ${DB_USER:postgres}
     password: ${DB_PASSWORD:}
   jpa:
-    # Normally left false (OSIV is a well-known anti-pattern for N+1s).
-    # Kept true here deliberately: TenantResolvingFilter needs a Hibernate
-    # Session already bound to the request thread so it can enable the
-    # tenantFilter before Spring Security's UserDetailsService runs its
-    # (filtered) DB lookup. Revisit if/when this becomes a real perf issue.
-    open-in-view: true
+    # False deliberately: this property only auto-registers an MVC
+    # *interceptor* version of open-session-in-view, which runs inside
+    # DispatcherServlet — too late for TenantResolvingFilter, which sits
+    # earlier in the Servlet filter chain. A real OpenEntityManagerInViewFilter
+    # bean (see SecurityConfig) is registered explicitly instead, positioned
+    # ahead of TenantResolvingFilter, so the whole request shares one bound
+    # session. (A first attempt left this `true` and relied on the
+    # interceptor — it silently didn't share a session with the filter
+    # chain at all; caught by live end-to-end testing, not by unit tests.)
+    open-in-view: false
     hibernate:
       # The schema is owned by Django's migrations. Spring Boot only ever
       # maps to it here, never alters it — never change this to update/create.

@@ -73,8 +73,14 @@ public class ReceptionService {
 
         // Temporary unique placeholder to avoid Django's own empty-string
         // collision window (see Phase 2 plan) — replaced below once we
-        // have a real id to format P-{id:06d} from.
-        patient.setPatientNumber("TMP-" + UUID.randomUUID());
+        // have a real id to format P-{id:06d} from. Column is
+        // varchar(20) (Django's patient_number = CharField(max_length=20)),
+        // so this must stay short — a full UUID does not fit and was
+        // caught only by live end-to-end testing (a DataIntegrityViolationException,
+        // "value too long for type character varying(20)"), not by the
+        // mocked-repository unit tests, since those never hit a real column
+        // length constraint.
+        patient.setPatientNumber("TMP" + UUID.randomUUID().toString().substring(0, 8));
         patientRepository.save(patient);
         patientRepository.flush();
 

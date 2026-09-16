@@ -32,10 +32,13 @@ rule-for-rule.
 
 **Deliberate behavior improvement over the Django source**: patient-number
 generation (`Patient.registerPatient`) uses a temporary unique placeholder
-(`"TMP-" + UUID`) for the initial insert instead of Django's blank string,
-which has a real (if narrow) race on concurrent registrations — see
+(`"TMP" + 8 hex chars`) for the initial insert instead of Django's blank
+string, which has a real (if narrow) race on concurrent registrations — see
 `ReceptionService.registerPatient`'s comment. Final stored values are
 identical (`P-000042`-style), so rows stay compatible across both apps.
+(First attempt used a full UUID — overflowed the `varchar(20)` column
+Django defined for this field, caught only once live end-to-end testing
+actually inserted a row; see "Bugs live testing caught" below.)
 
 ### Phase 3 — Doctor (start consultation, vitals, diagnosis, prescribe, order labs, complete)
 
@@ -61,9 +64,39 @@ drive the `Visit` state machine forward.
   rather than guessing. Until then, every entity-creating service method
   calls `TenantScoping.currentHospitalReference(entityManager)` once and
   sets it explicitly — one small helper, not framework magic.
-- **Hibernate filters need a session bound before Spring Security runs**,
-  which is why `spring.jpa.open-in-view` is `true` here (normally an
-  anti-pattern) — see the comment in `application.yml`.
+- **Hibernate filters need a session bound before Spring Security runs.**
+  `spring.jpa.open-in-view` is deliberately `false` (its default `true`
+  only auto-registers an MVC *interceptor*, which runs too late — see "Bugs
+  live testing caught" below for why that doesn't work here). Instead,
+  `SecurityConfig` registers a real `OpenEntityManagerInViewFilter` bean,
+  positioned ahead of `TenantResolvingFilter`, so one Hibernate session is
+  bound for the whole request.
+
+## Bugs live testing caught
+
+Both of these passed every unit test (mocked repositories can't catch
+either class of bug) and only surfaced once the app was actually run
+against real Postgres — the reason Phase 1's plan called out "verification"
+as a distinct step, and worth internalizing for every future phase:
+
+1. **Tenant filter silently not applied to real requests.** `open-in-view:
+   true` only wires Spring Boot's MVC *interceptor*, which runs inside
+   `DispatcherServlet` — after the Servlet filter chain (where
+   `TenantResolvingFilter` lives) has already executed. `entityManager.unwrap(Session.class)`
+   was therefore creating-and-immediately-closing a throwaway persistence
+   context every request; the `tenantFilter` it enabled was never the one
+   actually used downstream. Symptom: `LazyInitializationException: Could
+   not initialize proxy [Hospital#7] - no session` the moment a controller
+   touched a lazy association. Fixed by registering Spring's own
+   `OpenEntityManagerInViewFilter` explicitly, ordered before
+   `TenantResolvingFilter`, so a real session is bound for the whole
+   request — see `SecurityConfig`.
+2. **Patient-number placeholder too long for its own column.** `"TMP-" +
+   UUID` is ~40 characters; Django's `patient_number` column is
+   `varchar(20)`. First real `POST /api/patients` failed with
+   `DataIntegrityViolationException: value too long for type character
+   varying(20)`. Fixed by shortening the placeholder to `"TMP" + 8 hex
+   chars` (~11 characters) — see `ReceptionService.registerPatient`.
 
 ## Running it
 
@@ -87,6 +120,13 @@ never alter the schema; that's Django migrations' job.
 
 ### Verifying against real data
 
+**Done as of this session** — full Phase 1→3 flow run against the real
+`stjohns` hospital in the live `HMS` database (`doctor1`, a new `reception1`
+test user, a new `Patient`/`Appointment`/`Visit` all the way through to
+`WAITING_LAB`), then cross-checked by reading the same rows back from
+Django's own ORM (`manage.py shell`) — genuine proof both apps share live
+data, not just a schema. Example commands:
+
 ```
 curl -H "Host: <realsubdomain>.lvh.me:8000" \
      -u <existing-django-username>:<their-real-password> \
@@ -107,22 +147,39 @@ curl -H "Host: <realsubdomain>.lvh.me:8000" -u <receptionist>:<pass> \
 
 curl -H "Host: <realsubdomain>.lvh.me:8000" -u <receptionist>:<pass> \
      http://localhost:8080/api/reception/queue
+
+curl -H "Host: <realsubdomain>.lvh.me:8000" -u doctor1:<pass> -X POST http://localhost:8080/api/visits/<id>/start
+curl -H "Host: <realsubdomain>.lvh.me:8000" -u doctor1:<pass> -X POST http://localhost:8080/api/visits/<id>/complete
 ```
 
-**Known blocker, still open**: the Django `.env`'s `DB_PASSWORD` does not
-currently authenticate against the running local Postgres (`localhost:9999`)
-— `manage.py shell` hits the same `password authentication failed for user
-"postgres"` error, so this isn't something either app broke. Fix the
-Django-side DB credentials first, then run the checks above.
+The Postgres credential issue that previously blocked this (`.env`'s
+`DB_PASSWORD` not matching the running server) turned out to be exactly
+that — Postgres runs as a native Windows service
+(`postgresql-x64-18`, data dir `C:\Program Files\PostgreSQL\18\data`)
+whose actual `postgres` role password had drifted from `.env`. Fixed by
+briefly setting `pg_hba.conf` to `trust`, restarting the service (needs an
+elevated terminal — `Restart-Service postgresql-x64-18 -Force`), running
+`ALTER USER postgres WITH PASSWORD '...'` to match `.env`, then reverting
+`pg_hba.conf` and restarting once more.
+
+Local dev fixtures created in the `stjohns` hospital (id 7) for this
+verification, in case anyone needs to redo it: `doctor1`'s password reset to
+a known value, a new `reception1` (`RECEPTIONIST`) user, a `Drug`
+("Paracetamol") and `LabTest` ("CBC") row — see git history/session notes
+for the exact `manage.py shell` commands used, not repeated here since
+they're throwaway local data, not part of the app.
 
 ## Tests
 
 ```
-./mvnw test -Dtest='!HmsSpringBootApplicationTests'
+./mvnw test
 ```
 
-(Excluding the Initializr-generated context-load test, which needs a real
-DB connection — blocked by the same credential issue above.)
+`HmsSpringBootApplicationTests` (the Initializr-generated context-load
+test) needs a real DB connection and the `DB_*` env vars set — now that the
+Postgres credential issue is fixed, this passes too; run it with the same
+env vars as `spring-boot:run` above if running outside an IDE that already
+has them configured.
 
 - `DjangoPbkdf2PasswordEncoderTests` — verifies against a hash generated by Django's actual `PBKDF2PasswordHasher`.
 - `TenantResolvingFilterTests` — unit-level (mocked repository/session).
