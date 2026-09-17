@@ -2,7 +2,10 @@ package com.hms.repository;
 
 import com.hms.entity.User;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
 
+import java.util.List;
 import java.util.Optional;
 
 /**
@@ -15,4 +18,9 @@ import java.util.Optional;
 public interface UserRepository extends JpaRepository<User, Long> {
 
     Optional<User> findByUsername(String username);
+
+    long countByActiveTrueAndRoleNot(User.Role role);
+
+    @Query("select u.role, count(u) from User u where u.active = true and u.role <> :excludedRole group by u.role")
+    List<Object[]> countActiveGroupedByRoleExcluding(@Param("excludedRole") User.Role excludedRole);
 }

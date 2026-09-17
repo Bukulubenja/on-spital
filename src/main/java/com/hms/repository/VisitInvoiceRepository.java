@@ -8,11 +8,15 @@ import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
+import java.math.BigDecimal;
 import java.util.Optional;
 
 public interface VisitInvoiceRepository extends JpaRepository<VisitInvoice, Long> {
 
     Optional<VisitInvoice> findByVisit(Visit visit);
+
+    @Query("select coalesce(sum(i.totalAmount), 0) from VisitInvoice i")
+    BigDecimal sumTotalAmount();
 
     /**
      * Locks the visit's invoice for the rest of the caller's transaction —
