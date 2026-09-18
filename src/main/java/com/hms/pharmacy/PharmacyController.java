@@ -1,7 +1,9 @@
 package com.hms.pharmacy;
 
+import com.hms.audit.ClientIp;
 import com.hms.pharmacy.dto.DispenseResponse;
 import com.hms.pharmacy.dto.PrescriptionView;
+import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -20,8 +22,10 @@ public class PharmacyController {
 
     @PreAuthorize("hasRole('PHARMACIST')")
     @PostMapping("/api/visits/{id}/prescription-items/{itemId}/dispense")
-    public DispenseResponse dispense(@PathVariable("id") Long visitId, @PathVariable("itemId") Long itemId) {
-        return pharmacyService.dispensePrescriptionItem(visitId, itemId);
+    public DispenseResponse dispense(
+            @PathVariable("id") Long visitId, @PathVariable("itemId") Long itemId, HttpServletRequest httpRequest
+    ) {
+        return pharmacyService.dispensePrescriptionItem(visitId, itemId, ClientIp.from(httpRequest));
     }
 
     @PreAuthorize("hasRole('PHARMACIST')")

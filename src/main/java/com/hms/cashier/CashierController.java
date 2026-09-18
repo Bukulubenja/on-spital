@@ -1,9 +1,11 @@
 package com.hms.cashier;
 
+import com.hms.audit.ClientIp;
 import com.hms.cashier.dto.InvoiceItemRequest;
 import com.hms.cashier.dto.InvoiceView;
 import com.hms.cashier.dto.PaymentRequest;
 import com.hms.cashier.dto.PaymentResponse;
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
@@ -38,7 +40,9 @@ public class CashierController {
 
     @PreAuthorize("hasRole('CASHIER')")
     @PostMapping("/api/visits/{id}/payments")
-    public PaymentResponse recordPayment(@PathVariable("id") Long visitId, @Valid @RequestBody PaymentRequest request) {
-        return cashierService.recordPayment(visitId, request);
+    public PaymentResponse recordPayment(
+            @PathVariable("id") Long visitId, @Valid @RequestBody PaymentRequest request, HttpServletRequest httpRequest
+    ) {
+        return cashierService.recordPayment(visitId, request, ClientIp.from(httpRequest));
     }
 }

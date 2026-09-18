@@ -20,6 +20,7 @@ import java.time.LocalDate;
 import java.util.List;
 import java.util.Optional;
 
+import static com.hms.testsupport.EntityTestSupport.mockTenantScopedFind;
 import static com.hms.testsupport.EntityTestSupport.setField;
 import static com.hms.testsupport.EntityTestSupport.withId;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -89,7 +90,7 @@ class StockManagerServiceTests {
     @Test
     void drugStockDetailComputesBatchStatusFromExpiryDate() throws Exception {
         Drug paracetamol = newDrug(3L, "Paracetamol", "Analgesic", "500mg");
-        when(drugRepository.findById(3L)).thenReturn(Optional.of(paracetamol));
+        mockTenantScopedFind(entityManager, Drug.class, 3L, paracetamol);
 
         LocalDate today = LocalDate.now();
         Stock expired = new Stock(paracetamol, 5, today.minusDays(1), "BATCH-EXPIRED");
@@ -108,7 +109,7 @@ class StockManagerServiceTests {
     @Test
     void receiveStockToBrandNewBatchCreatesAStockRowAndAnInTransaction() throws Exception {
         Drug paracetamol = newDrug(3L, "Paracetamol", "Analgesic", "500mg");
-        when(drugRepository.findById(3L)).thenReturn(Optional.of(paracetamol));
+        mockTenantScopedFind(entityManager, Drug.class, 3L, paracetamol);
         when(stockRepository.findByDrugAndBatchNumber(paracetamol, "BATCH-NEW")).thenReturn(Optional.empty());
 
         service.receiveStock(3L, new ReceiveStockRequest("BATCH-NEW", 20, LocalDate.now().plusDays(180)));
@@ -120,7 +121,7 @@ class StockManagerServiceTests {
     @Test
     void receiveStockToAnExistingBatchTopsUpItsQuantityInsteadOfCreatingADuplicate() throws Exception {
         Drug paracetamol = newDrug(3L, "Paracetamol", "Analgesic", "500mg");
-        when(drugRepository.findById(3L)).thenReturn(Optional.of(paracetamol));
+        mockTenantScopedFind(entityManager, Drug.class, 3L, paracetamol);
         Stock existing = new Stock(paracetamol, 10, LocalDate.now().plusDays(180), "BATCH-EXISTING");
         when(stockRepository.findByDrugAndBatchNumber(paracetamol, "BATCH-EXISTING")).thenReturn(Optional.of(existing));
 
@@ -134,7 +135,7 @@ class StockManagerServiceTests {
     @Test
     void receiveStockRejectsAnExpiryDateThatIsNotInTheFuture() throws Exception {
         Drug paracetamol = newDrug(3L, "Paracetamol", "Analgesic", "500mg");
-        when(drugRepository.findById(3L)).thenReturn(Optional.of(paracetamol));
+        mockTenantScopedFind(entityManager, Drug.class, 3L, paracetamol);
 
         assertThatThrownBy(() -> service.receiveStock(3L, new ReceiveStockRequest("BATCH-X", 5, LocalDate.now())))
                 .isInstanceOf(ResponseStatusException.class)
@@ -146,7 +147,7 @@ class StockManagerServiceTests {
     void adjustStockRejectsABatchThatBelongsToAnotherDrug() throws Exception {
         Drug paracetamol = newDrug(3L, "Paracetamol", "Analgesic", "500mg");
         Drug ibuprofen = newDrug(4L, "Ibuprofen", "Analgesic", "200mg");
-        when(drugRepository.findById(3L)).thenReturn(Optional.of(paracetamol));
+        mockTenantScopedFind(entityManager, Drug.class, 3L, paracetamol);
         Stock otherDrugsBatch = withId(new Stock(ibuprofen, 10, LocalDate.now().plusDays(10), "BATCH-OTHER"), 99L);
         when(stockRepository.findByIdForUpdate(99L)).thenReturn(Optional.of(otherDrugsBatch));
 
@@ -158,7 +159,7 @@ class StockManagerServiceTests {
     @Test
     void adjustStockRejectsRemovingMoreThanIsLeftInTheBatch() throws Exception {
         Drug paracetamol = newDrug(3L, "Paracetamol", "Analgesic", "500mg");
-        when(drugRepository.findById(3L)).thenReturn(Optional.of(paracetamol));
+        mockTenantScopedFind(entityManager, Drug.class, 3L, paracetamol);
         Stock batch = withId(new Stock(paracetamol, 5, LocalDate.now().plusDays(10), "BATCH-A"), 99L);
         when(stockRepository.findByIdForUpdate(99L)).thenReturn(Optional.of(batch));
 
@@ -172,7 +173,7 @@ class StockManagerServiceTests {
     @Test
     void adjustStockDeductsTheQuantityAndRecordsAnOutTransaction() throws Exception {
         Drug paracetamol = newDrug(3L, "Paracetamol", "Analgesic", "500mg");
-        when(drugRepository.findById(3L)).thenReturn(Optional.of(paracetamol));
+        mockTenantScopedFind(entityManager, Drug.class, 3L, paracetamol);
         Stock batch = withId(new Stock(paracetamol, 20, LocalDate.now().plusDays(10), "BATCH-A"), 99L);
         when(stockRepository.findByIdForUpdate(99L)).thenReturn(Optional.of(batch));
 

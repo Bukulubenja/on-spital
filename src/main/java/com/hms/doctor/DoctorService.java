@@ -1,6 +1,7 @@
 package com.hms.doctor;
 
 import com.hms.access.VisitAccess;
+import com.hms.audit.AuditService;
 import com.hms.doctor.dto.DiagnosisRequest;
 import com.hms.doctor.dto.LabTestOrderResponse;
 import com.hms.doctor.dto.PrescriptionItemRequest;
@@ -17,15 +18,12 @@ import com.hms.entity.PrescriptionItem;
 import com.hms.entity.User;
 import com.hms.entity.Visit;
 import com.hms.entity.VitalSigns;
-import com.hms.repository.DrugRepository;
 import com.hms.repository.LabOrderItemRepository;
 import com.hms.repository.LabOrderRepository;
-import com.hms.repository.LabTestRepository;
 import com.hms.repository.MedicalRecordRepository;
 import com.hms.repository.PrescriptionItemRepository;
 import com.hms.repository.PrescriptionRepository;
 import com.hms.repository.QueueTicketRepository;
-import com.hms.repository.VisitRepository;
 import com.hms.repository.VitalSignsRepository;
 import com.hms.security.HmsUserPrincipal;
 import com.hms.tenancy.TenantScoping;
@@ -44,7 +42,6 @@ import org.springframework.web.server.ResponseStatusException;
 @Service
 public class DoctorService {
 
-    private final VisitRepository visitRepository;
     private final QueueTicketRepository queueTicketRepository;
     private final VitalSignsRepository vitalSignsRepository;
     private final MedicalRecordRepository medicalRecordRepository;
@@ -52,12 +49,10 @@ public class DoctorService {
     private final PrescriptionItemRepository prescriptionItemRepository;
     private final LabOrderRepository labOrderRepository;
     private final LabOrderItemRepository labOrderItemRepository;
-    private final DrugRepository drugRepository;
-    private final LabTestRepository labTestRepository;
     private final EntityManager entityManager;
+    private final AuditService auditService;
 
     public DoctorService(
-            VisitRepository visitRepository,
             QueueTicketRepository queueTicketRepository,
             VitalSignsRepository vitalSignsRepository,
             MedicalRecordRepository medicalRecordRepository,
@@ -65,11 +60,9 @@ public class DoctorService {
             PrescriptionItemRepository prescriptionItemRepository,
             LabOrderRepository labOrderRepository,
             LabOrderItemRepository labOrderItemRepository,
-            DrugRepository drugRepository,
-            LabTestRepository labTestRepository,
-            EntityManager entityManager
+            EntityManager entityManager,
+            AuditService auditService
     ) {
-        this.visitRepository = visitRepository;
         this.queueTicketRepository = queueTicketRepository;
         this.vitalSignsRepository = vitalSignsRepository;
         this.medicalRecordRepository = medicalRecordRepository;
@@ -77,9 +70,8 @@ public class DoctorService {
         this.prescriptionItemRepository = prescriptionItemRepository;
         this.labOrderRepository = labOrderRepository;
         this.labOrderItemRepository = labOrderItemRepository;
-        this.drugRepository = drugRepository;
-        this.labTestRepository = labTestRepository;
         this.entityManager = entityManager;
+        this.auditService = auditService;
     }
 
     private static User currentDoctor() {
@@ -88,7 +80,7 @@ public class DoctorService {
     }
 
     private Visit requireVisit(Long visitId) {
-        return visitRepository.findById(visitId)
+        return TenantScoping.findByIdTenantScoped(entityManager, Visit.class, visitId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Visit not found"));
     }
 
@@ -128,21 +120,23 @@ public class DoctorService {
     }
 
     @Transactional
-    public void recordDiagnosis(Long visitId, DiagnosisRequest request) {
+    public void recordDiagnosis(Long visitId, DiagnosisRequest request, String ipAddress) {
         Visit visit = requireActiveConsultation(visitId);
+        User doctor = currentDoctor();
         MedicalRecord record = new MedicalRecord(
-                visit, visit.getPatient(), currentDoctor(), request.diagnosis(), request.notes()
+                visit, visit.getPatient(), doctor, request.diagnosis(), request.notes()
         );
         record.setHospital(TenantScoping.currentHospitalReference(entityManager));
         medicalRecordRepository.save(record);
 
         visit.setDiagnosisSummary(request.diagnosis());
+        auditService.record(doctor, "RECORD_DIAGNOSIS", "hospital_medicalrecord", record.getId(), ipAddress);
     }
 
     @Transactional
     public void addPrescriptionItem(Long visitId, PrescriptionItemRequest request) {
         Visit visit = requireActiveConsultation(visitId);
-        Drug drug = drugRepository.findById(request.drugId())
+        Drug drug = TenantScoping.findByIdTenantScoped(entityManager, Drug.class, request.drugId())
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Drug not found"));
 
         Prescription prescription = prescriptionRepository.findByVisit(visit).orElseGet(() -> {
@@ -162,7 +156,7 @@ public class DoctorService {
     @Transactional
     public LabTestOrderResponse addLabTest(Long visitId, Long testId) {
         Visit visit = requireActiveConsultation(visitId);
-        LabTest test = labTestRepository.findById(testId)
+        LabTest test = TenantScoping.findByIdTenantScoped(entityManager, LabTest.class, testId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Lab test not found"));
 
         LabOrder labOrder = labOrderRepository.findByVisit(visit).orElseGet(() -> {

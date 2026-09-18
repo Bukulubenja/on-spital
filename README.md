@@ -4,7 +4,7 @@ A learning project: rebuilding the Django `HMS` hospital-management system in
 Spring Boot, one workflow at a time, against the **same Postgres database**.
 See the Django repo's `CLAUDE.md` for the original system this mirrors.
 
-## Status: Phase 9 — Admin workflow
+## Status: Phase 11 — TenantIsolationTests (found and fixed a real cross-tenant IDOR)
 
 ### Phase 1 — Foundation (tenancy + auth)
 
@@ -269,6 +269,142 @@ own discussion before starting this phase):
   `VisitInvoiceRepository.sumTotalAmount`, `PatientRepository.findTop5ByOrderByCreatedAtDesc`.
   All read-only, no new locking needed since nothing here writes.
 
+### Phase 10 — AuditLog
+
+Mirrors `hospital/services.py`'s `record_audit_log` and the four (of its
+eight total) `hospital/views.py` call sites that map to workflows this
+rebuild actually has: `RECORD_DIAGNOSIS` (Doctor), `RECORD_LAB_RESULT`
+(Lab), `DISPENSE_PRESCRIPTION_ITEM` (Pharmacy), `RECORD_PAYMENT` (Cashier).
+The other four Django call sites (`ACKNOWLEDGE_EMERGENCY_ALERT`,
+`RESOLVE_EMERGENCY_ALERT`, `APPROVE_REFILL_REQUEST`, `DENY_REFILL_REQUEST`)
+are for `EmergencyAlert`/`RefillRequest` features no phase has ported, so
+there's nothing to wire them into. Nurse, Stock Manager, and Reception
+mutations are **not** audited — confirmed against the Django source, not
+assumed: none of `nurse_record_vitals`, `receive_stock`/`adjust_stock`, or
+`patient_create`/`appointment_create`/`appointment_checkin` call
+`record_audit_log` either.
+
+- `com.hms.entity.AuditLog` — mapped onto the existing `hospital_auditlog`
+  table (verified against the live schema before writing the entity, since
+  `ddl-auto=validate` gives zero tolerance for a mismatch). `recordId` is
+  deliberately `Integer`, not `Long` — Django's column is a
+  `PositiveIntegerField`, narrower than every other entity's `bigint` id,
+  and mirroring it field-for-field means keeping that narrowness rather
+  than "fixing" it. `ipAddress` uses Hibernate 7's `@JdbcTypeCode(SqlTypes.INET)`
+  on a `String` field to map onto Postgres's native `inet` column type —
+  confirmed working live (`curl` from `localhost` stored as `::1`).
+- `com.hms.audit.AuditService` — one shared `record(user, action,
+  tableName, recordId, ipAddress)` method, injected into
+  `DoctorService`/`LabService`/`PharmacyService`/`CashierService`. Unlike
+  Django, where every `record_audit_log` call site lives in `views.py` and
+  `services.py` stays free of HTTP objects, the write itself happens here
+  in the Spring service layer (immediately after the mutation it records,
+  on the same success path Django's callers use) — controllers still
+  extract the client IP at the HTTP boundary via `com.hms.audit.ClientIp`
+  (a direct port of `views.py`'s `_client_ip`) and pass it down as a plain
+  `String`, so `HttpServletRequest` itself never reaches the service layer.
+  A deliberate, documented deviation from Django's exact file boundaries,
+  not from its behavior.
+- Fires only on the real mutation path, never the idempotent early-return
+  branches (`alreadyRecorded`/`alreadyDispensed`/`alreadySettled`) — matches
+  Django's `record_audit_log` calls, which likewise sit after the "already
+  done" guard clauses, not before them. Confirmed both live (a repeat
+  payment against a fully-settled invoice writes no second row) and in
+  each service's test suite.
+- `LabService`/`CashierService` gained a `currentLabUser()`/`currentCashier()`
+  helper (same `SecurityContextHolder` → `HmsUserPrincipal` pattern
+  `DoctorService`/`PharmacyService` already used) — neither service
+  previously needed to know who was calling it, since Lab/Cashier have no
+  per-user ownership check; the audit log is the first thing in either
+  workflow that cares who acted, not just that the action happened.
+
+### Phase 11 — TenantIsolationTests (found and fixed a real cross-tenant IDOR)
+
+Direct port of the Django source's `hospital/tests.py`'s `TenantIsolationTests`
+— the one gap called out as open since Phase 1: every other test class in
+this project mocks its repositories, proving each workflow works *within*
+a tenant but never that two tenants can't see each other. This phase wrote
+that test for real, against real Postgres and the real Servlet filter
+chain (`TenantResolvingFilter`, Spring Security, `OpenEntityManagerInViewFilter`)
+— and it immediately found a genuine, exploitable vulnerability, not a
+hypothetical one.
+
+**The bug.** Hibernate's `@Filter`-based tenant scoping — the mechanism
+behind every `hospital-a.lvh.me` request being unable to see
+`hospital-b.lvh.me`'s data — does not apply to Spring Data's
+`findById(id)`. `findById` compiles to `EntityManager.find()`, a direct
+primary-key load that bypasses Hibernate's filter machinery entirely; only
+derived-query methods (`findByStatus`, `findByVisit`, etc.) actually run
+through a filtered JPQL query. Proof, live: authenticated as one hospital's
+doctor, `POST /api/visits/{anotherHospitalsVisitId}/start` returned `409`
+("This visit cannot be started") — meaning the visit *was found* — instead
+of the `404` a correctly tenant-scoped lookup should give, while
+`GET /api/nurse/queue` (a derived-query method) correctly excluded the
+same cross-hospital visit in the same test run.
+
+- `com.hms.tenancy.TenantScoping.findByIdTenantScoped(EntityManager, Class<T>, Long)`
+  — the fix: an explicit JPQL `select e from <Type> e where e.id = :id`
+  query, which Hibernate's filter *does* apply to, replacing
+  `repository.findById(id)` everywhere a tenant-scoped entity's "not found"
+  result needs to mean "not visible to this tenant," not just "no row with
+  that id anywhere." `entityClass.getSimpleName()` is interpolated into the
+  JPQL string, safe because callers always pass a compile-time class
+  literal, never user input.
+- **14 call sites across 7 services** replaced: `DoctorService` (Visit ×1,
+  Drug, LabTest), `NurseService` (Visit), `LabService` (Visit ×2),
+  `PharmacyService` (Visit), `CashierService` (Visit, BillableService),
+  `ReceptionService` (Patient, User, Department, Appointment),
+  `StockManagerService` (Drug). Two `findById` call sites were deliberately
+  **left unchanged** — `LabService`'s `labOrderItemRepository.findById`
+  and `PharmacyService`'s `prescriptionItemRepository.findById` — because
+  each is already safe by construction: both cross-check the looked-up
+  item against a `LabOrder`/`Visit` that was *itself* already fetched
+  through a tenant-safe query first, so a cross-tenant id can't pass the
+  follow-up `.filter(...)` either way.
+- Several services lost repository fields/constructor parameters entirely
+  (`DoctorService` no longer takes `VisitRepository`/`DrugRepository`/
+  `LabTestRepository`; `CashierService` no longer takes
+  `VisitRepository`/`BillableServiceRepository`; `PharmacyService` no
+  longer takes `VisitRepository`; `ReceptionService` no longer takes
+  `DepartmentRepository`/`UserRepository`) once their only use was the now-removed
+  `findById` call — deleted rather than left as dead fields, per this
+  project's own no-dead-code convention.
+- `com.hms.testsupport.EntityTestSupport.mockTenantScopedFind(EntityManager, Class<T>, Long, T)`
+  — new shared test helper mocking the `entityManager.createQuery(...).setParameter(...).getResultStream()`
+  chain `findByIdTenantScoped` runs under the hood, since a mocked
+  `EntityManager` needs that chain stubbed instead of a simple
+  `when(repository.findById(id)).thenReturn(...)`. Every existing test
+  that previously stubbed a now-fixed `findById` call was updated to use
+  it instead (`DoctorServiceTests`, `NurseServiceTests`, `LabServiceTests`,
+  `CashierServiceTests`, `PharmacyServiceTests`, `ReceptionServiceTests`,
+  `StockManagerServiceTests`).
+- `com.hms.entity.User` gained six previously-unmapped columns
+  (`is_superuser`, `is_staff`, `first_name`, `last_name`, `email`,
+  `date_joined`) — a second bug this phase's own test setup surfaced.
+  Every prior phase only ever *read* pre-existing Django-created `User`
+  rows; `TenantIsolationTests` is the first code in this rebuild to
+  actually `INSERT` a `User` via Hibernate (creating cross-hospital test
+  fixtures), which immediately failed on Postgres's `is_superuser NOT NULL`
+  constraint — a column with no DB-level default (Django enforces
+  `False`/`""`/`now()` at the app layer only). Mapped with the same Django
+  defaults `AbstractUser` uses, still with no public setters since nothing
+  outside test fixtures needs to change them.
+- `com.hms.tenancy.TenantIsolationTests` itself creates and tears down real
+  `Hospital`/`User`/`Patient`/`Department`/`Visit` rows per test (not
+  wrapped in a rollback-per-test transaction) via `MockMvc` +
+  `@SpringBootTest(webEnvironment = MOCK)` — real HTTP Basic auth, real
+  `Host`-header tenant resolution (`request.setServerName(...)` via a
+  `RequestPostProcessor`, since MockMvc doesn't parse a literal `Host`
+  header into `getServerName()` the way a real servlet container does),
+  real Servlet filter chain. Four cases, each a direct port of the Django
+  test of the same name: same username colliding across two hospitals
+  (doesn't — different ids), login only authenticating against the
+  correct hospital, a cross-hospital visit lookup returning `404` not
+  `403`/`409`, and a cross-hospital visit never appearing in a
+  tenant-scoped list endpoint (`GET /api/nurse/queue`, this rebuild's
+  closest analogue to Django's `patient_list`, since no all-patients
+  listing endpoint exists here).
+
 ## Design notes
 
 - **`hospital` auto-population on insert is explicit, not automatic.**
@@ -289,10 +425,10 @@ own discussion before starting this phase):
 
 ## Bugs live testing caught
 
-Both of these passed every unit test (mocked repositories can't catch
-either class of bug) and only surfaced once the app was actually run
-against real Postgres — the reason Phase 1's plan called out "verification"
-as a distinct step, and worth internalizing for every future phase:
+All three passed every unit test (mocked repositories can't catch any of
+these) and only surfaced once the app was actually run against real
+Postgres — the reason Phase 1's plan called out "verification" as a
+distinct step, and worth internalizing for every future phase:
 
 1. **Tenant filter silently not applied to real requests.** `open-in-view:
    true` only wires Spring Boot's MVC *interceptor*, which runs inside
@@ -312,6 +448,18 @@ as a distinct step, and worth internalizing for every future phase:
    `DataIntegrityViolationException: value too long for type character
    varying(20)`. Fixed by shortening the placeholder to `"TMP" + 8 hex
    chars` (~11 characters) — see `ReceptionService.registerPatient`.
+3. **Cross-tenant IDOR via `findById` bypassing Hibernate's `@Filter`.**
+   The most serious of the three — see Phase 11 above for the full
+   writeup. `visitRepository.findById(id)` (and 13 other tenant-scoped
+   `findById` calls) never actually applied the `tenantFilter`, so an
+   authenticated user in one hospital could act on another hospital's
+   data just by guessing/incrementing a numeric id. Confirmed live: a
+   cross-hospital `POST /api/visits/{id}/start` returned `409` (found,
+   wrong status) instead of `404` (should be invisible) before the fix,
+   `404` after. Fixed via `TenantScoping.findByIdTenantScoped`, an
+   explicit JPQL query that Hibernate's filter does apply to, replacing
+   every `findById` call where "not found" needs to mean "not visible to
+   this tenant."
 
 ## Running it
 
@@ -335,7 +483,25 @@ never alter the schema; that's Django migrations' job.
 
 ### Verifying against real data
 
-**Done as of this session (Phase 9)** — `GET /api/admin/dashboard` run
+**Done as of this session (Phase 10)** — a fresh patient run through
+register → checkin → start consultation → `POST /api/visits/{id}/diagnosis`
+against the live `stjohns` hospital wrote a real `hospital_auditlog` row:
+`action: RECORD_DIAGNOSIS`, `table_name: hospital_medicalrecord`,
+`record_id` matching the new `MedicalRecord`'s id, `user_id` matching
+`doctor1`'s id, `hospital_id: 7`, and `ip_address: ::1` (confirming the
+`@JdbcTypeCode(SqlTypes.INET)` mapping round-trips through Postgres's
+native `inet` column correctly, not just as an opaque string). A follow-up
+`POST /api/visits/{id}/payments` on the same visit wrote a second row
+(`RECORD_PAYMENT` / `hospital_payment`, `user_id` matching `cashier1`'s
+id) — confirmed both mutations fire, with the correct actor, table, and
+record each time. `ddl-auto=validate` also passed at startup and in
+`HmsSpringBootApplicationTests`, which is the real proof the `AuditLog`
+entity's column mapping is byte-for-byte correct against the live
+`hospital_auditlog` schema Django's migrations created — a validate-mode
+mismatch would have failed the app at boot, not silently produced wrong
+data.
+
+**Done in a prior session (Phase 9)** — `GET /api/admin/dashboard` run
 against the live `stjohns` hospital, and every figure cross-checked by hand
 against this project's own test history: `totalPatients: 3` and
 `recentPatients` listing all three in the right order; `activeVisits: 1`
@@ -500,38 +666,36 @@ has them configured.
 - `NurseServiceTests` — triage-queue listing with the has-vitals flag, successful vitals recording on a `WAITING_DOCTOR` visit, rejection once a visit has moved past triage, and rejection for a nonexistent visit, all against mocked repositories.
 - `StockManagerServiceTests` — dashboard aggregation (per-drug totals, expiry counts, recent transactions), per-drug batch status computation (`EXPIRED`/`EXPIRING_SOON`/`FRESH`), receive-stock creating a new batch vs. topping up an existing one, the future-expiry-date guard, adjust-stock's cross-drug ownership rejection, its insufficient-quantity rejection (no partial write), and a successful write-off, all against mocked repositories.
 - `AdminServiceTests` — outstanding-balance arithmetic, the undefined (`null`) delta when yesterday's figure was zero, a computed percentage delta, low-stock-drug counting, grouped-row-to-`LabelCount` mapping, the 14-day zero-filled trend series, and recent-payment patient-name resolution through the invoice, all against mocked repositories.
-
-Worth adding once a phase needs real concurrency/isolation proof: a full
-`@SpringBootTest` against real Postgres mirroring Django's
-`TenantIsolationTests` — not done yet since mocks were enough to prove the
-logic in Phases 1–9.
+- Audit logging is covered inline in each of `DoctorServiceTests`/`LabServiceTests`/`PharmacyServiceTests`/`CashierServiceTests` (not a separate `AuditServiceTests`, since `AuditService` itself has no branching logic to test beyond what mocking it verifies at each call site): one test per service asserting `auditService.record(...)` is called with the right action/table/record-id/user, plus one asserting it's *not* called on that service's idempotent early-return path.
+- `TenantIsolationTests` — a real `@SpringBootTest`/`MockMvc` test against
+  actual Postgres (not mocked repositories), see Phase 11 above for the
+  full writeup: same username in two hospitals doesn't collide, login only
+  authenticates against the correct hospital, a cross-hospital visit
+  lookup is `404` not `403`/`409`, and a cross-hospital visit never
+  surfaces in a tenant-scoped list endpoint.
 
 ## Not in scope for this phase
 
-All 9 planned phases (Reception, Doctor, Lab, Pharmacy, Cashier, Nurse,
-Stock Manager, Admin) are now done. Deliberately left out of Phase 9 and
+All 9 planned workflow phases (Reception, Doctor, Lab, Pharmacy, Cashier,
+Nurse, Stock Manager, Admin) plus Phase 10 (AuditLog) and Phase 11
+(TenantIsolationTests) are now done. Deliberately left out of Phase 9 and
 still open, per the scope decisions made before starting it: bed/ward
 occupancy and per-department doctor/nurse headcounts (needs `Ward`/`Bed`/
-`Admission` and the `Doctor`/`Nurse` profile models — a whole inpatient/
-staffing subsystem no phase has mapped), `AuditLog` and `record_audit_log`
-retrofitted into Phases 1–8's mutating services (Phase 9 itself is
-read-only, so it added neither), and `grant_admin_staff_access`
-(Django-admin group access is meaningless here — this app has no admin UI
-of its own). The separate patient-facing portal/API (14
-`@role_required("PATIENT")` views plus `hospital/api/`'s JWT-based DRF API
-for the React Native app) remains a bigger, architecturally different
-subsystem — own auth flow, messaging, telemedicine, notifications — never
-part of this rebuild's phase list; treat it as an open scope question, not
-an assumed future phase.
+`Admission` and the `Doctor`/`Nurse` profile models — a whole
+inpatient/staffing subsystem no phase has mapped), and
+`grant_admin_staff_access` (Django-admin group access is meaningless here
+— this app has no admin UI of its own). The separate patient-facing
+portal/API (14 `@role_required("PATIENT")` views plus `hospital/api/`'s
+JWT-based DRF API for the React Native app) remains a bigger,
+architecturally different subsystem — own auth flow, messaging,
+telemedicine, notifications — never part of this rebuild's phase list;
+treat it as an open scope question, not an assumed future phase.
 
 ## Next
 
 No more phases are queued. Candidates, in roughly ascending order of
-effort: (1) the `TenantIsolationTests` analogue noted above — real
-concurrency/isolation proof against Postgres, the one gap called out since
-Phase 1; (2) `AuditLog` + backfilling `record_audit_log` into Phases 1–8;
-(3) `Ward`/`Bed`/`Admission` read-mapping to complete the Admin dashboard's
-bed occupancy; (4) the patient-facing portal/API, which is less "one more
-phase" and more a second rebuild effort with its own auth model. Pick
-based on what's actually needed next rather than working this list in
-order.
+effort: (1) `Ward`/`Bed`/`Admission` read-mapping to complete the Admin
+dashboard's bed occupancy; (2) the patient-facing portal/API, which is
+less "one more phase" and more a second rebuild effort with its own auth
+model. Pick based on what's actually needed next rather than working this
+list in order.

@@ -20,8 +20,8 @@ import org.springframework.web.server.ResponseStatusException;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.util.List;
-import java.util.Optional;
 
+import static com.hms.testsupport.EntityTestSupport.mockTenantScopedFind;
 import static com.hms.testsupport.EntityTestSupport.setField;
 import static com.hms.testsupport.EntityTestSupport.withId;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -98,7 +98,7 @@ class NurseServiceTests {
     @Test
     void recordVitalsSucceedsForAVisitStillWaitingOnADoctor() {
         Visit visit = waitingVisit();
-        when(visitRepository.findById(20L)).thenReturn(Optional.of(visit));
+        mockTenantScopedFind(entityManager, Visit.class, 20L, visit);
 
         service.recordVitals(20L, sampleVitals());
 
@@ -109,7 +109,7 @@ class NurseServiceTests {
     void recordVitalsRejectsAVisitAlreadyPastTriage() {
         Visit visit = waitingVisit();
         setField(visit, Visit.class, "status", Visit.Status.IN_CONSULTATION);
-        when(visitRepository.findById(20L)).thenReturn(Optional.of(visit));
+        mockTenantScopedFind(entityManager, Visit.class, 20L, visit);
 
         assertThatThrownBy(() -> service.recordVitals(20L, sampleVitals()))
                 .isInstanceOf(ResponseStatusException.class)
@@ -119,7 +119,7 @@ class NurseServiceTests {
 
     @Test
     void recordVitalsRejectsWhenTheVisitDoesNotExist() {
-        when(visitRepository.findById(20L)).thenReturn(Optional.empty());
+        mockTenantScopedFind(entityManager, Visit.class, 20L, null);
 
         assertThatThrownBy(() -> service.recordVitals(20L, sampleVitals()))
                 .isInstanceOf(ResponseStatusException.class);

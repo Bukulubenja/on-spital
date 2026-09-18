@@ -11,10 +11,8 @@ import com.hms.reception.dto.CheckInResponse;
 import com.hms.reception.dto.PatientRequest;
 import com.hms.reception.dto.QueueTicketResponse;
 import com.hms.repository.AppointmentRepository;
-import com.hms.repository.DepartmentRepository;
 import com.hms.repository.PatientRepository;
 import com.hms.repository.QueueTicketRepository;
-import com.hms.repository.UserRepository;
 import com.hms.repository.VisitRepository;
 import com.hms.tenancy.TenantScoping;
 import jakarta.persistence.EntityManager;
@@ -41,8 +39,6 @@ public class ReceptionService {
     private final AppointmentRepository appointmentRepository;
     private final VisitRepository visitRepository;
     private final QueueTicketRepository queueTicketRepository;
-    private final DepartmentRepository departmentRepository;
-    private final UserRepository userRepository;
     private final EntityManager entityManager;
 
     public ReceptionService(
@@ -50,16 +46,12 @@ public class ReceptionService {
             AppointmentRepository appointmentRepository,
             VisitRepository visitRepository,
             QueueTicketRepository queueTicketRepository,
-            DepartmentRepository departmentRepository,
-            UserRepository userRepository,
             EntityManager entityManager
     ) {
         this.patientRepository = patientRepository;
         this.appointmentRepository = appointmentRepository;
         this.visitRepository = visitRepository;
         this.queueTicketRepository = queueTicketRepository;
-        this.departmentRepository = departmentRepository;
-        this.userRepository = userRepository;
         this.entityManager = entityManager;
     }
 
@@ -90,14 +82,14 @@ public class ReceptionService {
 
     @Transactional
     public Appointment bookAppointment(AppointmentRequest request) {
-        Patient patient = patientRepository.findById(request.patientId())
+        Patient patient = TenantScoping.findByIdTenantScoped(entityManager, Patient.class, request.patientId())
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Patient not found"));
-        User doctor = userRepository.findById(request.doctorId())
+        User doctor = TenantScoping.findByIdTenantScoped(entityManager, User.class, request.doctorId())
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Doctor not found"));
         if (doctor.getRole() != User.Role.DOCTOR) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Selected user is not a doctor");
         }
-        Department department = departmentRepository.findById(request.departmentId())
+        Department department = TenantScoping.findByIdTenantScoped(entityManager, Department.class, request.departmentId())
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Department not found"));
 
         Appointment appointment = new Appointment(
@@ -110,7 +102,7 @@ public class ReceptionService {
 
     @Transactional
     public CheckInResponse checkIn(Long appointmentId) {
-        Appointment appointment = appointmentRepository.findById(appointmentId)
+        Appointment appointment = TenantScoping.findByIdTenantScoped(entityManager, Appointment.class, appointmentId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Appointment not found"));
 
         if (appointment.getStatus() != Appointment.Status.SCHEDULED) {

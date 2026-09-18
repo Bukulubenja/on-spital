@@ -6,10 +6,8 @@ import com.hms.entity.Patient;
 import com.hms.entity.QueueTicket;
 import com.hms.reception.dto.PatientRequest;
 import com.hms.repository.AppointmentRepository;
-import com.hms.repository.DepartmentRepository;
 import com.hms.repository.PatientRepository;
 import com.hms.repository.QueueTicketRepository;
-import com.hms.repository.UserRepository;
 import com.hms.repository.VisitRepository;
 import com.hms.tenancy.TenantContext;
 import jakarta.persistence.EntityManager;
@@ -22,6 +20,7 @@ import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.util.Optional;
 
+import static com.hms.testsupport.EntityTestSupport.mockTenantScopedFind;
 import static com.hms.testsupport.EntityTestSupport.setField;
 import static com.hms.testsupport.EntityTestSupport.withId;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -37,13 +36,11 @@ class ReceptionServiceTests {
     private final AppointmentRepository appointmentRepository = mock(AppointmentRepository.class);
     private final VisitRepository visitRepository = mock(VisitRepository.class);
     private final QueueTicketRepository queueTicketRepository = mock(QueueTicketRepository.class);
-    private final DepartmentRepository departmentRepository = mock(DepartmentRepository.class);
-    private final UserRepository userRepository = mock(UserRepository.class);
     private final EntityManager entityManager = mock(EntityManager.class);
 
     private final ReceptionService service = new ReceptionService(
             patientRepository, appointmentRepository, visitRepository,
-            queueTicketRepository, departmentRepository, userRepository, entityManager
+            queueTicketRepository, entityManager
     );
 
     @BeforeEach
@@ -71,7 +68,7 @@ class ReceptionServiceTests {
     void checkInRejectsAppointmentThatIsNotScheduled() {
         Appointment appointment = scheduledAppointment();
         setField(appointment, Appointment.class, "status", Appointment.Status.CANCELLED);
-        when(appointmentRepository.findById(10L)).thenReturn(Optional.of(appointment));
+        mockTenantScopedFind(entityManager, Appointment.class, 10L, appointment);
 
         assertThatThrownBy(() -> service.checkIn(10L))
                 .isInstanceOf(ResponseStatusException.class)
@@ -81,7 +78,7 @@ class ReceptionServiceTests {
     @Test
     void checkInRejectsAnAppointmentAlreadyCheckedIn() {
         Appointment appointment = scheduledAppointment();
-        when(appointmentRepository.findById(10L)).thenReturn(Optional.of(appointment));
+        mockTenantScopedFind(entityManager, Appointment.class, 10L, appointment);
         when(visitRepository.existsByAppointment(appointment)).thenReturn(true);
 
         assertThatThrownBy(() -> service.checkIn(10L))
@@ -92,7 +89,7 @@ class ReceptionServiceTests {
     @Test
     void checkInStartsQueueAtOneWhenNoTicketsExistToday() {
         Appointment appointment = scheduledAppointment();
-        when(appointmentRepository.findById(10L)).thenReturn(Optional.of(appointment));
+        mockTenantScopedFind(entityManager, Appointment.class, 10L, appointment);
         when(visitRepository.existsByAppointment(appointment)).thenReturn(false);
         when(queueTicketRepository.findFirstByCreatedAtBetweenOrderByQueueNumberDesc(any(), any()))
                 .thenReturn(Optional.empty());
@@ -106,7 +103,7 @@ class ReceptionServiceTests {
     @Test
     void checkInContinuesTheQueueFromTheDaysLastTicket() {
         Appointment appointment = scheduledAppointment();
-        when(appointmentRepository.findById(10L)).thenReturn(Optional.of(appointment));
+        mockTenantScopedFind(entityManager, Appointment.class, 10L, appointment);
         when(visitRepository.existsByAppointment(appointment)).thenReturn(false);
 
         QueueTicket lastTicket = new QueueTicket(null, 5);

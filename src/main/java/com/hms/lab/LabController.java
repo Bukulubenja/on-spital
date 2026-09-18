@@ -1,8 +1,10 @@
 package com.hms.lab;
 
+import com.hms.audit.ClientIp;
 import com.hms.lab.dto.LabOrderView;
 import com.hms.lab.dto.LabResultRequest;
 import com.hms.lab.dto.LabResultResponse;
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -26,9 +28,10 @@ public class LabController {
     public LabResultResponse recordResult(
             @PathVariable("id") Long visitId,
             @PathVariable("itemId") Long itemId,
-            @Valid @RequestBody LabResultRequest request
+            @Valid @RequestBody LabResultRequest request,
+            HttpServletRequest httpRequest
     ) {
-        return labService.recordLabResult(visitId, itemId, request);
+        return labService.recordLabResult(visitId, itemId, request, ClientIp.from(httpRequest));
     }
 
     @PreAuthorize("hasRole('LAB')")

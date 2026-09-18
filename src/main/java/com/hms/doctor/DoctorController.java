@@ -1,11 +1,13 @@
 package com.hms.doctor;
 
+import com.hms.audit.ClientIp;
 import com.hms.doctor.dto.DiagnosisRequest;
 import com.hms.doctor.dto.LabTestOrderRequest;
 import com.hms.doctor.dto.LabTestOrderResponse;
 import com.hms.doctor.dto.PrescriptionItemRequest;
 import com.hms.doctor.dto.VisitStatusResponse;
 import com.hms.doctor.dto.VitalsRequest;
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
@@ -43,8 +45,10 @@ public class DoctorController {
 
     @PreAuthorize("hasRole('DOCTOR')")
     @PostMapping("/api/visits/{id}/diagnosis")
-    public ResponseEntity<Void> recordDiagnosis(@PathVariable("id") Long visitId, @Valid @RequestBody DiagnosisRequest request) {
-        doctorService.recordDiagnosis(visitId, request);
+    public ResponseEntity<Void> recordDiagnosis(
+            @PathVariable("id") Long visitId, @Valid @RequestBody DiagnosisRequest request, HttpServletRequest httpRequest
+    ) {
+        doctorService.recordDiagnosis(visitId, request, ClientIp.from(httpRequest));
         return ResponseEntity.noContent().build();
     }
 

@@ -50,7 +50,7 @@ public class StockManagerService {
     }
 
     private Drug requireDrug(Long drugId) {
-        return drugRepository.findById(drugId)
+        return TenantScoping.findByIdTenantScoped(entityManager, Drug.class, drugId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Drug not found"));
     }
 

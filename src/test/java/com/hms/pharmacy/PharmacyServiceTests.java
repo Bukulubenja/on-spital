@@ -1,5 +1,6 @@
 package com.hms.pharmacy;
 
+import com.hms.audit.AuditService;
 import com.hms.entity.Drug;
 import com.hms.entity.Hospital;
 import com.hms.entity.Patient;
@@ -12,7 +13,6 @@ import com.hms.repository.PrescriptionItemRepository;
 import com.hms.repository.PrescriptionRepository;
 import com.hms.repository.StockRepository;
 import com.hms.repository.StockTransactionRepository;
-import com.hms.repository.VisitRepository;
 import com.hms.security.HmsUserPrincipal;
 import com.hms.tenancy.TenantContext;
 import jakarta.persistence.EntityManager;
@@ -27,6 +27,7 @@ import java.time.LocalDate;
 import java.util.List;
 import java.util.Optional;
 
+import static com.hms.testsupport.EntityTestSupport.mockTenantScopedFind;
 import static com.hms.testsupport.EntityTestSupport.setField;
 import static com.hms.testsupport.EntityTestSupport.withId;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -39,17 +40,19 @@ import static org.mockito.Mockito.when;
 
 class PharmacyServiceTests {
 
-    private final VisitRepository visitRepository = mock(VisitRepository.class);
     private final PrescriptionRepository prescriptionRepository = mock(PrescriptionRepository.class);
     private final PrescriptionItemRepository prescriptionItemRepository = mock(PrescriptionItemRepository.class);
     private final StockRepository stockRepository = mock(StockRepository.class);
     private final StockTransactionRepository stockTransactionRepository = mock(StockTransactionRepository.class);
     private final EntityManager entityManager = mock(EntityManager.class);
+    private final AuditService auditService = mock(AuditService.class);
 
     private final PharmacyService service = new PharmacyService(
-            visitRepository, prescriptionRepository, prescriptionItemRepository,
-            stockRepository, stockTransactionRepository, entityManager
+            prescriptionRepository, prescriptionItemRepository,
+            stockRepository, stockTransactionRepository, entityManager, auditService
     );
+
+    private User pharmacistUser;
 
     @BeforeEach
     void setUpTenantContextAndCurrentPharmacist() throws Exception {
@@ -58,8 +61,8 @@ class PharmacyServiceTests {
         hospitalConstructor.setAccessible(true);
         when(entityManager.getReference(Hospital.class, 1L)).thenReturn(hospitalConstructor.newInstance());
 
-        User pharmacist = newUser(9L, "pharm1", User.Role.PHARMACIST);
-        var principal = new HmsUserPrincipal(pharmacist);
+        pharmacistUser = newUser(9L, "pharm1", User.Role.PHARMACIST);
+        var principal = new HmsUserPrincipal(pharmacistUser);
         SecurityContextHolder.getContext().setAuthentication(
                 new UsernamePasswordAuthenticationToken(principal, null, principal.getAuthorities()));
     }
@@ -107,9 +110,9 @@ class PharmacyServiceTests {
     @Test
     void dispenseRejectsAVisitThatIsNotAwaitingPharmacy() {
         Visit visit = visitWithStatus(Visit.Status.WAITING_LAB);
-        when(visitRepository.findById(20L)).thenReturn(Optional.of(visit));
+        mockTenantScopedFind(entityManager, Visit.class, 20L, visit);
 
-        assertThatThrownBy(() -> service.dispensePrescriptionItem(20L, 1L))
+        assertThatThrownBy(() -> service.dispensePrescriptionItem(20L, 1L, "127.0.0.1"))
                 .isInstanceOf(ResponseStatusException.class)
                 .hasMessageContaining("not awaiting pharmacy");
     }
@@ -117,7 +120,7 @@ class PharmacyServiceTests {
     @Test
     void dispensingAnAlreadyDispensedItemIsIdempotentAndTouchesNoStock() throws Exception {
         Visit visit = visitWithStatus(Visit.Status.WAITING_PHARMACY);
-        when(visitRepository.findById(20L)).thenReturn(Optional.of(visit));
+        mockTenantScopedFind(entityManager, Visit.class, 20L, visit);
 
         Drug paracetamol = newDrug(3L, "Paracetamol");
         Prescription prescription = newPrescription(30L, visit);
@@ -125,18 +128,19 @@ class PharmacyServiceTests {
         item.markDispensed(newUser(9L, "pharm1", User.Role.PHARMACIST));
         when(prescriptionItemRepository.findById(40L)).thenReturn(Optional.of(item));
 
-        var response = service.dispensePrescriptionItem(20L, 40L);
+        var response = service.dispensePrescriptionItem(20L, 40L, "127.0.0.1");
 
         assertThat(response.alreadyDispensed()).isTrue();
         assertThat(response.drugName()).isEqualTo("Paracetamol");
         verify(stockRepository, org.mockito.Mockito.never())
                 .findByDrugAndQuantityGreaterThanOrderByExpiryDateAsc(any(), anyInt());
+        verify(auditService, org.mockito.Mockito.never()).record(any(), any(), any(), any(), any());
     }
 
     @Test
     void deductsFromEarliestExpiryBatchesFirstAndMarksItemDispensed() throws Exception {
         Visit visit = visitWithStatus(Visit.Status.WAITING_PHARMACY);
-        when(visitRepository.findById(20L)).thenReturn(Optional.of(visit));
+        mockTenantScopedFind(entityManager, Visit.class, 20L, visit);
 
         Drug paracetamol = newDrug(3L, "Paracetamol");
         Prescription prescription = newPrescription(30L, visit);
@@ -149,19 +153,20 @@ class PharmacyServiceTests {
                 .thenReturn(List.of(earlyBatch, laterBatch));
         when(prescriptionItemRepository.existsByPrescriptionAndDispensedFalse(prescription)).thenReturn(false);
 
-        var response = service.dispensePrescriptionItem(20L, 40L);
+        var response = service.dispensePrescriptionItem(20L, 40L, "127.0.0.1");
 
         assertThat(response.alreadyDispensed()).isFalse();
         assertThat(earlyBatch.getQuantity()).isZero();
         assertThat(laterBatch.getQuantity()).isEqualTo(8);
         assertThat(item.isDispensed()).isTrue();
         verify(stockTransactionRepository).save(any());
+        verify(auditService).record(pharmacistUser, "DISPENSE_PRESCRIPTION_ITEM", "hospital_prescriptionitem", 40L, "127.0.0.1");
     }
 
     @Test
     void insufficientStockAcrossAllBatchesLeavesEverythingUnchanged() throws Exception {
         Visit visit = visitWithStatus(Visit.Status.WAITING_PHARMACY);
-        when(visitRepository.findById(20L)).thenReturn(Optional.of(visit));
+        mockTenantScopedFind(entityManager, Visit.class, 20L, visit);
 
         Drug paracetamol = newDrug(3L, "Paracetamol");
         Prescription prescription = newPrescription(30L, visit);
@@ -172,7 +177,7 @@ class PharmacyServiceTests {
         when(stockRepository.findByDrugAndQuantityGreaterThanOrderByExpiryDateAsc(paracetamol, 0))
                 .thenReturn(List.of(onlyBatch));
 
-        assertThatThrownBy(() -> service.dispensePrescriptionItem(20L, 40L))
+        assertThatThrownBy(() -> service.dispensePrescriptionItem(20L, 40L, "127.0.0.1"))
                 .isInstanceOf(ResponseStatusException.class)
                 .hasMessageContaining("Not enough stock");
 
@@ -184,7 +189,7 @@ class PharmacyServiceTests {
     @Test
     void lastRemainingItemDispensedCompletesTheVisit() throws Exception {
         Visit visit = visitWithStatus(Visit.Status.WAITING_PHARMACY);
-        when(visitRepository.findById(20L)).thenReturn(Optional.of(visit));
+        mockTenantScopedFind(entityManager, Visit.class, 20L, visit);
 
         Drug paracetamol = newDrug(3L, "Paracetamol");
         Prescription prescription = newPrescription(30L, visit);
@@ -196,7 +201,7 @@ class PharmacyServiceTests {
                 .thenReturn(List.of(batch));
         when(prescriptionItemRepository.existsByPrescriptionAndDispensedFalse(prescription)).thenReturn(false);
 
-        var response = service.dispensePrescriptionItem(20L, 40L);
+        var response = service.dispensePrescriptionItem(20L, 40L, "127.0.0.1");
 
         assertThat(visit.getStatus()).isEqualTo(Visit.Status.COMPLETED);
         assertThat(response.visitStatus()).isEqualTo("COMPLETED");
@@ -205,7 +210,7 @@ class PharmacyServiceTests {
     @Test
     void moreItemsStillPendingKeepsVisitWaitingPharmacy() throws Exception {
         Visit visit = visitWithStatus(Visit.Status.WAITING_PHARMACY);
-        when(visitRepository.findById(20L)).thenReturn(Optional.of(visit));
+        mockTenantScopedFind(entityManager, Visit.class, 20L, visit);
 
         Drug paracetamol = newDrug(3L, "Paracetamol");
         Prescription prescription = newPrescription(30L, visit);
@@ -217,7 +222,7 @@ class PharmacyServiceTests {
                 .thenReturn(List.of(batch));
         when(prescriptionItemRepository.existsByPrescriptionAndDispensedFalse(prescription)).thenReturn(true);
 
-        var response = service.dispensePrescriptionItem(20L, 40L);
+        var response = service.dispensePrescriptionItem(20L, 40L, "127.0.0.1");
 
         assertThat(visit.getStatus()).isEqualTo(Visit.Status.WAITING_PHARMACY);
         assertThat(response.visitStatus()).isEqualTo("WAITING_PHARMACY");

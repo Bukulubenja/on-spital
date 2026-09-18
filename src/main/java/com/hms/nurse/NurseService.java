@@ -56,7 +56,7 @@ public class NurseService {
 
     @Transactional
     public void recordVitals(Long visitId, VitalsRequest request) {
-        Visit visit = visitRepository.findById(visitId)
+        Visit visit = TenantScoping.findByIdTenantScoped(entityManager, Visit.class, visitId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Visit not found"));
         User nurse = currentNurse();
         if (!VisitAccess.nurseCanAccess(nurse, visit)) {

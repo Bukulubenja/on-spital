@@ -1,5 +1,6 @@
 package com.hms.pharmacy;
 
+import com.hms.audit.AuditService;
 import com.hms.entity.Drug;
 import com.hms.entity.Prescription;
 import com.hms.entity.PrescriptionItem;
@@ -13,7 +14,6 @@ import com.hms.repository.PrescriptionItemRepository;
 import com.hms.repository.PrescriptionRepository;
 import com.hms.repository.StockRepository;
 import com.hms.repository.StockTransactionRepository;
-import com.hms.repository.VisitRepository;
 import com.hms.security.HmsUserPrincipal;
 import com.hms.tenancy.TenantScoping;
 import jakarta.persistence.EntityManager;
@@ -37,27 +37,27 @@ public class PharmacyService {
 
     private static final Set<Visit.Status> VIEWABLE_STATUSES = Set.of(Visit.Status.WAITING_PHARMACY, Visit.Status.COMPLETED);
 
-    private final VisitRepository visitRepository;
     private final PrescriptionRepository prescriptionRepository;
     private final PrescriptionItemRepository prescriptionItemRepository;
     private final StockRepository stockRepository;
     private final StockTransactionRepository stockTransactionRepository;
     private final EntityManager entityManager;
+    private final AuditService auditService;
 
     public PharmacyService(
-            VisitRepository visitRepository,
             PrescriptionRepository prescriptionRepository,
             PrescriptionItemRepository prescriptionItemRepository,
             StockRepository stockRepository,
             StockTransactionRepository stockTransactionRepository,
-            EntityManager entityManager
+            EntityManager entityManager,
+            AuditService auditService
     ) {
-        this.visitRepository = visitRepository;
         this.prescriptionRepository = prescriptionRepository;
         this.prescriptionItemRepository = prescriptionItemRepository;
         this.stockRepository = stockRepository;
         this.stockTransactionRepository = stockTransactionRepository;
         this.entityManager = entityManager;
+        this.auditService = auditService;
     }
 
     private static User currentPharmacist() {
@@ -66,12 +66,12 @@ public class PharmacyService {
     }
 
     private Visit requireVisit(Long visitId) {
-        return visitRepository.findById(visitId)
+        return TenantScoping.findByIdTenantScoped(entityManager, Visit.class, visitId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Visit not found"));
     }
 
     @Transactional
-    public DispenseResponse dispensePrescriptionItem(Long visitId, Long itemId) {
+    public DispenseResponse dispensePrescriptionItem(Long visitId, Long itemId, String ipAddress) {
         Visit visit = requireVisit(visitId);
         if (visit.getStatus() != Visit.Status.WAITING_PHARMACY) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "This visit is not awaiting pharmacy");
@@ -108,7 +108,9 @@ public class PharmacyService {
         stockTransaction.setHospital(TenantScoping.currentHospitalReference(entityManager));
         stockTransactionRepository.save(stockTransaction);
 
-        item.markDispensed(currentPharmacist());
+        User pharmacist = currentPharmacist();
+        item.markDispensed(pharmacist);
+        auditService.record(pharmacist, "DISPENSE_PRESCRIPTION_ITEM", "hospital_prescriptionitem", item.getId(), ipAddress);
 
         if (!prescriptionItemRepository.existsByPrescriptionAndDispensedFalse(item.getPrescription())) {
             visit.setStatus(Visit.Status.COMPLETED);

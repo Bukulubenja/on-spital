@@ -1,5 +1,6 @@
 package com.hms.cashier;
 
+import com.hms.audit.AuditService;
 import com.hms.cashier.dto.InvoiceItemRequest;
 import com.hms.cashier.dto.InvoiceView;
 import com.hms.cashier.dto.PaymentRequest;
@@ -7,16 +8,17 @@ import com.hms.cashier.dto.PaymentResponse;
 import com.hms.entity.BillableService;
 import com.hms.entity.InvoiceItem;
 import com.hms.entity.Payment;
+import com.hms.entity.User;
 import com.hms.entity.Visit;
 import com.hms.entity.VisitInvoice;
-import com.hms.repository.BillableServiceRepository;
 import com.hms.repository.InvoiceItemRepository;
 import com.hms.repository.PaymentRepository;
 import com.hms.repository.VisitInvoiceRepository;
-import com.hms.repository.VisitRepository;
+import com.hms.security.HmsUserPrincipal;
 import com.hms.tenancy.TenantScoping;
 import jakarta.persistence.EntityManager;
 import org.springframework.http.HttpStatus;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
@@ -35,31 +37,33 @@ import java.math.BigDecimal;
 @Service
 public class CashierService {
 
-    private final VisitRepository visitRepository;
     private final VisitInvoiceRepository visitInvoiceRepository;
     private final InvoiceItemRepository invoiceItemRepository;
     private final PaymentRepository paymentRepository;
-    private final BillableServiceRepository billableServiceRepository;
     private final EntityManager entityManager;
+    private final AuditService auditService;
 
     public CashierService(
-            VisitRepository visitRepository,
             VisitInvoiceRepository visitInvoiceRepository,
             InvoiceItemRepository invoiceItemRepository,
             PaymentRepository paymentRepository,
-            BillableServiceRepository billableServiceRepository,
-            EntityManager entityManager
+            EntityManager entityManager,
+            AuditService auditService
     ) {
-        this.visitRepository = visitRepository;
         this.visitInvoiceRepository = visitInvoiceRepository;
         this.invoiceItemRepository = invoiceItemRepository;
         this.paymentRepository = paymentRepository;
-        this.billableServiceRepository = billableServiceRepository;
         this.entityManager = entityManager;
+        this.auditService = auditService;
+    }
+
+    private static User currentCashier() {
+        var principal = (HmsUserPrincipal) SecurityContextHolder.getContext().getAuthentication().getPrincipal();
+        return principal.getUser();
     }
 
     private Visit requireVisit(Long visitId) {
-        return visitRepository.findById(visitId)
+        return TenantScoping.findByIdTenantScoped(entityManager, Visit.class, visitId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Visit not found"));
     }
 
@@ -103,7 +107,7 @@ public class CashierService {
         Visit visit = requireVisit(visitId);
         VisitInvoice invoice = getOrCreateInvoice(visit);
 
-        BillableService service = billableServiceRepository.findById(request.serviceId())
+        BillableService service = TenantScoping.findByIdTenantScoped(entityManager, BillableService.class, request.serviceId())
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Service not found"));
 
         InvoiceItem item = new InvoiceItem(invoice, service, request.quantity(), service.getPrice());
@@ -114,7 +118,7 @@ public class CashierService {
     }
 
     @Transactional
-    public PaymentResponse recordPayment(Long visitId, PaymentRequest request) {
+    public PaymentResponse recordPayment(Long visitId, PaymentRequest request, String ipAddress) {
         Visit visit = requireVisit(visitId);
         VisitInvoice invoice = visitInvoiceRepository.findByVisitForUpdate(visit)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Invoice not found"));
@@ -134,6 +138,7 @@ public class CashierService {
         payment.setHospital(TenantScoping.currentHospitalReference(entityManager));
         paymentRepository.save(payment);
         payment.assignReceiptNumber();
+        auditService.record(currentCashier(), "RECORD_PAYMENT", "hospital_payment", payment.getId(), ipAddress);
 
         refreshInvoiceTotals(invoice);
 
