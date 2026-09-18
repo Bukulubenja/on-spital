@@ -8,8 +8,10 @@ import com.hms.entity.Patient;
 import com.hms.entity.QueueTicket;
 import com.hms.entity.User;
 import com.hms.entity.Visit;
+import com.hms.repository.DrugRepository;
 import com.hms.repository.LabOrderItemRepository;
 import com.hms.repository.LabOrderRepository;
+import com.hms.repository.LabTestRepository;
 import com.hms.repository.MedicalRecordRepository;
 import com.hms.repository.PrescriptionItemRepository;
 import com.hms.repository.PrescriptionRepository;
@@ -46,13 +48,15 @@ class DoctorServiceTests {
     private final PrescriptionItemRepository prescriptionItemRepository = mock(PrescriptionItemRepository.class);
     private final LabOrderRepository labOrderRepository = mock(LabOrderRepository.class);
     private final LabOrderItemRepository labOrderItemRepository = mock(LabOrderItemRepository.class);
+    private final DrugRepository drugRepository = mock(DrugRepository.class);
+    private final LabTestRepository labTestRepository = mock(LabTestRepository.class);
     private final EntityManager entityManager = mock(EntityManager.class);
     private final AuditService auditService = mock(AuditService.class);
 
     private final DoctorService service = new DoctorService(
             queueTicketRepository, vitalSignsRepository, medicalRecordRepository,
             prescriptionRepository, prescriptionItemRepository, labOrderRepository, labOrderItemRepository,
-            entityManager, auditService
+            drugRepository, labTestRepository, entityManager, auditService
     );
 
     private User doctorUser;

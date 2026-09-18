@@ -6,8 +6,10 @@ import com.hms.entity.Patient;
 import com.hms.entity.QueueTicket;
 import com.hms.reception.dto.PatientRequest;
 import com.hms.repository.AppointmentRepository;
+import com.hms.repository.DepartmentRepository;
 import com.hms.repository.PatientRepository;
 import com.hms.repository.QueueTicketRepository;
+import com.hms.repository.UserRepository;
 import com.hms.repository.VisitRepository;
 import com.hms.tenancy.TenantContext;
 import jakarta.persistence.EntityManager;
@@ -36,11 +38,13 @@ class ReceptionServiceTests {
     private final AppointmentRepository appointmentRepository = mock(AppointmentRepository.class);
     private final VisitRepository visitRepository = mock(VisitRepository.class);
     private final QueueTicketRepository queueTicketRepository = mock(QueueTicketRepository.class);
+    private final UserRepository userRepository = mock(UserRepository.class);
+    private final DepartmentRepository departmentRepository = mock(DepartmentRepository.class);
     private final EntityManager entityManager = mock(EntityManager.class);
 
     private final ReceptionService service = new ReceptionService(
             patientRepository, appointmentRepository, visitRepository,
-            queueTicketRepository, entityManager
+            queueTicketRepository, userRepository, departmentRepository, entityManager
     );
 
     @BeforeEach

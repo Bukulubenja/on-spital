@@ -5,6 +5,7 @@ import com.hms.cashier.dto.InvoiceItemRequest;
 import com.hms.cashier.dto.InvoiceView;
 import com.hms.cashier.dto.PaymentRequest;
 import com.hms.cashier.dto.PaymentResponse;
+import com.hms.cashier.dto.ServiceSummary;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import org.springframework.http.ResponseEntity;
@@ -14,6 +15,8 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RestController;
+
+import java.util.List;
 
 /** Direct analogue of the CASHIER-only views in hospital/views.py acting on a Visit's invoice. */
 @RestController
@@ -44,5 +47,11 @@ public class CashierController {
             @PathVariable("id") Long visitId, @Valid @RequestBody PaymentRequest request, HttpServletRequest httpRequest
     ) {
         return cashierService.recordPayment(visitId, request, ClientIp.from(httpRequest));
+    }
+
+    @PreAuthorize("hasRole('CASHIER')")
+    @GetMapping("/api/services")
+    public List<ServiceSummary> listServices() {
+        return cashierService.listServices();
     }
 }

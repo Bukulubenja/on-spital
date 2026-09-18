@@ -3,8 +3,11 @@ package com.hms.reception;
 import com.hms.reception.dto.AppointmentRequest;
 import com.hms.reception.dto.AppointmentResponse;
 import com.hms.reception.dto.CheckInResponse;
+import com.hms.reception.dto.DepartmentSummary;
+import com.hms.reception.dto.DoctorSummary;
 import com.hms.reception.dto.PatientRequest;
 import com.hms.reception.dto.PatientResponse;
+import com.hms.reception.dto.PatientSummary;
 import com.hms.reception.dto.QueueTicketResponse;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
@@ -14,7 +17,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.List;
@@ -58,5 +61,23 @@ public class ReceptionController {
     @GetMapping("/api/reception/queue")
     public List<QueueTicketResponse> todaysQueue() {
         return receptionService.todaysQueue();
+    }
+
+    @PreAuthorize("hasRole('RECEPTIONIST')")
+    @GetMapping("/api/patients")
+    public List<PatientSummary> searchPatients(@RequestParam(name = "q", required = false) String query) {
+        return receptionService.searchPatients(query);
+    }
+
+    @PreAuthorize("hasRole('RECEPTIONIST')")
+    @GetMapping("/api/doctors")
+    public List<DoctorSummary> listDoctors() {
+        return receptionService.listDoctors();
+    }
+
+    @PreAuthorize("hasRole('RECEPTIONIST')")
+    @GetMapping("/api/departments")
+    public List<DepartmentSummary> listDepartments() {
+        return receptionService.listDepartments();
     }
 }

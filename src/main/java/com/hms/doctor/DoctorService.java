@@ -3,7 +3,9 @@ package com.hms.doctor;
 import com.hms.access.VisitAccess;
 import com.hms.audit.AuditService;
 import com.hms.doctor.dto.DiagnosisRequest;
+import com.hms.doctor.dto.DrugLookup;
 import com.hms.doctor.dto.LabTestOrderResponse;
+import com.hms.doctor.dto.LabTestSummary;
 import com.hms.doctor.dto.PrescriptionItemRequest;
 import com.hms.doctor.dto.VisitStatusResponse;
 import com.hms.doctor.dto.VitalsRequest;
@@ -18,8 +20,10 @@ import com.hms.entity.PrescriptionItem;
 import com.hms.entity.User;
 import com.hms.entity.Visit;
 import com.hms.entity.VitalSigns;
+import com.hms.repository.DrugRepository;
 import com.hms.repository.LabOrderItemRepository;
 import com.hms.repository.LabOrderRepository;
+import com.hms.repository.LabTestRepository;
 import com.hms.repository.MedicalRecordRepository;
 import com.hms.repository.PrescriptionItemRepository;
 import com.hms.repository.PrescriptionRepository;
@@ -33,6 +37,8 @@ import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
+
+import java.util.List;
 
 /**
  * Mirrors hospital/views.py's visit_start/visit_record_vitals/
@@ -49,6 +55,8 @@ public class DoctorService {
     private final PrescriptionItemRepository prescriptionItemRepository;
     private final LabOrderRepository labOrderRepository;
     private final LabOrderItemRepository labOrderItemRepository;
+    private final DrugRepository drugRepository;
+    private final LabTestRepository labTestRepository;
     private final EntityManager entityManager;
     private final AuditService auditService;
 
@@ -60,6 +68,8 @@ public class DoctorService {
             PrescriptionItemRepository prescriptionItemRepository,
             LabOrderRepository labOrderRepository,
             LabOrderItemRepository labOrderItemRepository,
+            DrugRepository drugRepository,
+            LabTestRepository labTestRepository,
             EntityManager entityManager,
             AuditService auditService
     ) {
@@ -70,6 +80,8 @@ public class DoctorService {
         this.prescriptionItemRepository = prescriptionItemRepository;
         this.labOrderRepository = labOrderRepository;
         this.labOrderItemRepository = labOrderItemRepository;
+        this.drugRepository = drugRepository;
+        this.labTestRepository = labTestRepository;
         this.entityManager = entityManager;
         this.auditService = auditService;
     }
@@ -182,5 +194,15 @@ public class DoctorService {
         boolean hasPrescriptions = prescriptionRepository.existsByVisit(visit);
         visit.setStatus(VisitWorkflow.afterConsultation(hasLabOrders, hasPrescriptions));
         return new VisitStatusResponse(visit.getId(), visit.getStatus().name());
+    }
+
+    @Transactional(readOnly = true)
+    public List<DrugLookup> listDrugs() {
+        return drugRepository.findAllByOrderByNameAsc().stream().map(DrugLookup::from).toList();
+    }
+
+    @Transactional(readOnly = true)
+    public List<LabTestSummary> listLabTests() {
+        return labTestRepository.findAllByOrderByNameAsc().stream().map(LabTestSummary::from).toList();
     }
 }

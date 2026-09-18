@@ -5,12 +5,14 @@ import com.hms.cashier.dto.InvoiceItemRequest;
 import com.hms.cashier.dto.InvoiceView;
 import com.hms.cashier.dto.PaymentRequest;
 import com.hms.cashier.dto.PaymentResponse;
+import com.hms.cashier.dto.ServiceSummary;
 import com.hms.entity.BillableService;
 import com.hms.entity.InvoiceItem;
 import com.hms.entity.Payment;
 import com.hms.entity.User;
 import com.hms.entity.Visit;
 import com.hms.entity.VisitInvoice;
+import com.hms.repository.BillableServiceRepository;
 import com.hms.repository.InvoiceItemRepository;
 import com.hms.repository.PaymentRepository;
 import com.hms.repository.VisitInvoiceRepository;
@@ -24,6 +26,7 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.math.BigDecimal;
+import java.util.List;
 
 /**
  * Mirrors hospital/views.py's visit_invoice_detail/add_invoice_item/
@@ -40,6 +43,7 @@ public class CashierService {
     private final VisitInvoiceRepository visitInvoiceRepository;
     private final InvoiceItemRepository invoiceItemRepository;
     private final PaymentRepository paymentRepository;
+    private final BillableServiceRepository billableServiceRepository;
     private final EntityManager entityManager;
     private final AuditService auditService;
 
@@ -47,12 +51,14 @@ public class CashierService {
             VisitInvoiceRepository visitInvoiceRepository,
             InvoiceItemRepository invoiceItemRepository,
             PaymentRepository paymentRepository,
+            BillableServiceRepository billableServiceRepository,
             EntityManager entityManager,
             AuditService auditService
     ) {
         this.visitInvoiceRepository = visitInvoiceRepository;
         this.invoiceItemRepository = invoiceItemRepository;
         this.paymentRepository = paymentRepository;
+        this.billableServiceRepository = billableServiceRepository;
         this.entityManager = entityManager;
         this.auditService = auditService;
     }
@@ -158,5 +164,10 @@ public class CashierService {
         BigDecimal balanceDue = invoice.getTotalAmount().subtract(amountPaid);
         return new InvoiceView(
                 invoice.getId(), invoice.getTotalAmount(), amountPaid, balanceDue, invoice.getStatus().name(), items, payments);
+    }
+
+    @Transactional(readOnly = true)
+    public List<ServiceSummary> listServices() {
+        return billableServiceRepository.findAllByOrderByNameAsc().stream().map(ServiceSummary::from).toList();
     }
 }

@@ -2,8 +2,10 @@ package com.hms.doctor;
 
 import com.hms.audit.ClientIp;
 import com.hms.doctor.dto.DiagnosisRequest;
+import com.hms.doctor.dto.DrugLookup;
 import com.hms.doctor.dto.LabTestOrderRequest;
 import com.hms.doctor.dto.LabTestOrderResponse;
+import com.hms.doctor.dto.LabTestSummary;
 import com.hms.doctor.dto.PrescriptionItemRequest;
 import com.hms.doctor.dto.VisitStatusResponse;
 import com.hms.doctor.dto.VitalsRequest;
@@ -11,10 +13,13 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RestController;
+
+import java.util.List;
 
 /**
  * Direct analogue of the DOCTOR-only views in hospital/views.py acting on a
@@ -69,5 +74,17 @@ public class DoctorController {
     @PostMapping("/api/visits/{id}/complete")
     public VisitStatusResponse completeVisit(@PathVariable("id") Long visitId) {
         return doctorService.completeVisit(visitId);
+    }
+
+    @PreAuthorize("hasRole('DOCTOR')")
+    @GetMapping("/api/drugs")
+    public List<DrugLookup> listDrugs() {
+        return doctorService.listDrugs();
+    }
+
+    @PreAuthorize("hasRole('DOCTOR')")
+    @GetMapping("/api/lab-tests")
+    public List<LabTestSummary> listLabTests() {
+        return doctorService.listLabTests();
     }
 }

@@ -10,6 +10,7 @@ import com.hms.entity.Payment;
 import com.hms.entity.User;
 import com.hms.entity.Visit;
 import com.hms.entity.VisitInvoice;
+import com.hms.repository.BillableServiceRepository;
 import com.hms.repository.InvoiceItemRepository;
 import com.hms.repository.PaymentRepository;
 import com.hms.repository.VisitInvoiceRepository;
@@ -44,12 +45,13 @@ class CashierServiceTests {
     private final VisitInvoiceRepository visitInvoiceRepository = mock(VisitInvoiceRepository.class);
     private final InvoiceItemRepository invoiceItemRepository = mock(InvoiceItemRepository.class);
     private final PaymentRepository paymentRepository = mock(PaymentRepository.class);
+    private final BillableServiceRepository billableServiceRepository = mock(BillableServiceRepository.class);
     private final EntityManager entityManager = mock(EntityManager.class);
     private final AuditService auditService = mock(AuditService.class);
 
     private final CashierService service = new CashierService(
             visitInvoiceRepository, invoiceItemRepository,
-            paymentRepository, entityManager, auditService
+            paymentRepository, billableServiceRepository, entityManager, auditService
     );
 
     private User cashierUser;

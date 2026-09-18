@@ -8,4 +8,10 @@ import java.util.List;
 public interface PatientRepository extends JpaRepository<Patient, Long> {
 
     List<Patient> findTop5ByOrderByCreatedAtDesc();
+
+    List<Patient> findTop50ByOrderByFullNameAsc();
+
+    List<Patient> findTop50ByFullNameContainingIgnoreCaseOrPatientNumberContainingIgnoreCaseOrderByFullNameAsc(
+            String fullNameQuery, String patientNumberQuery
+    );
 }

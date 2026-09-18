@@ -8,11 +8,16 @@ import com.hms.entity.User;
 import com.hms.entity.Visit;
 import com.hms.reception.dto.AppointmentRequest;
 import com.hms.reception.dto.CheckInResponse;
+import com.hms.reception.dto.DepartmentSummary;
+import com.hms.reception.dto.DoctorSummary;
 import com.hms.reception.dto.PatientRequest;
+import com.hms.reception.dto.PatientSummary;
 import com.hms.reception.dto.QueueTicketResponse;
 import com.hms.repository.AppointmentRepository;
+import com.hms.repository.DepartmentRepository;
 import com.hms.repository.PatientRepository;
 import com.hms.repository.QueueTicketRepository;
+import com.hms.repository.UserRepository;
 import com.hms.repository.VisitRepository;
 import com.hms.tenancy.TenantScoping;
 import jakarta.persistence.EntityManager;
@@ -39,6 +44,8 @@ public class ReceptionService {
     private final AppointmentRepository appointmentRepository;
     private final VisitRepository visitRepository;
     private final QueueTicketRepository queueTicketRepository;
+    private final UserRepository userRepository;
+    private final DepartmentRepository departmentRepository;
     private final EntityManager entityManager;
 
     public ReceptionService(
@@ -46,12 +53,16 @@ public class ReceptionService {
             AppointmentRepository appointmentRepository,
             VisitRepository visitRepository,
             QueueTicketRepository queueTicketRepository,
+            UserRepository userRepository,
+            DepartmentRepository departmentRepository,
             EntityManager entityManager
     ) {
         this.patientRepository = patientRepository;
         this.appointmentRepository = appointmentRepository;
         this.visitRepository = visitRepository;
         this.queueTicketRepository = queueTicketRepository;
+        this.userRepository = userRepository;
+        this.departmentRepository = departmentRepository;
         this.entityManager = entityManager;
     }
 
@@ -145,5 +156,24 @@ public class ReceptionService {
                 .stream()
                 .map(QueueTicketResponse::from)
                 .toList();
+    }
+
+    /** Backs the appointment-booking form's patient picker — capped at 50 rows, matching, or most recent, since there's no pagination UI yet. */
+    @Transactional(readOnly = true)
+    public List<PatientSummary> searchPatients(String query) {
+        List<Patient> patients = (query == null || query.isBlank())
+                ? patientRepository.findTop50ByOrderByFullNameAsc()
+                : patientRepository.findTop50ByFullNameContainingIgnoreCaseOrPatientNumberContainingIgnoreCaseOrderByFullNameAsc(query, query);
+        return patients.stream().map(PatientSummary::from).toList();
+    }
+
+    @Transactional(readOnly = true)
+    public List<DoctorSummary> listDoctors() {
+        return userRepository.findByRoleAndActiveTrueOrderByUsernameAsc(User.Role.DOCTOR).stream().map(DoctorSummary::from).toList();
+    }
+
+    @Transactional(readOnly = true)
+    public List<DepartmentSummary> listDepartments() {
+        return departmentRepository.findAllByOrderByNameAsc().stream().map(DepartmentSummary::from).toList();
     }
 }
