@@ -35,3 +35,7 @@ app:
   # mirrors Django's settings.DEBUG gate in TenantMiddleware. Never enable
   # this in a real deployment — see TenantResolvingFilter for why.
   debug: ${APP_DEBUG:true}
+  # Comma-separated browser origins allowed by CORS (empty = no browser
+  # client can call this API). hms-web's Vite dev server needs this set
+  # locally — see SecurityConfig.corsConfigurationSource.
+  cors-allowed-origins: ${APP_CORS_ALLOWED_ORIGINS:http://localhost:5173}
